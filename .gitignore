@@ -1,0 +1,54 @@
+# 本地工具/调试脚本（不同步Git）
+tools/
+
+# 项目规划/设计文档（不同步Git）
+PLAN.md
+DESIGN.md
+
+# 外部参考文档（不同步Git）
+docs/
+
+# 本地待办（不同步Git）
+TODO.md
+
+# 项目说明（原始需求文档）
+项目说明.md
+
+# 配置文件（含敏感信息）
+config.yaml
+
+# Cookie（B站登录凭证）
+cookies.json
+
+# 置顶动态状态文件（运行时自动生成）
+pinned_dynamic_state.json
+
+# 数据库（运行时生成）
+*.db
+*.db-shm
+*.db-wal
+
+# 日志（运行时生成）
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 测试临时文件
+test_*.db
+demo_*.html
+
+# OS
+.DS_Store
+Thumbs.db
+sent_emails/

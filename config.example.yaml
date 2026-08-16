@@ -1,0 +1,74 @@
+# ============================================================
+# EchoWatch（留声）— 配置文件模板
+# 复制为 config.yaml 并填写真实值
+# ============================================================
+
+# --- UP主 监测列表（当前1个，后期可扩展至 3 个）---
+up_list:
+  - uid: "目标UID"                 # B站 UID
+    name: "目标UP主"               # 昵称（用于邮件抬头）
+    topics:                        # 场景二：该UP关注的话题ID列表
+      - 话题ID                     # 话题编号
+    priority_dynamics:             # 场景一：优先监测的动态ID（兜底用，自动发现失败时使用）
+      - "动态ID"                   # 置顶动态ID（auto模式下可为空，自动发现）
+
+# --- 场景开关 ---
+monitor:
+  scene1_enabled: true             # 场景一：UP主自身作品评论区监测
+  scene2_enabled: true             # 场景二：话题互动监测
+
+# --- 轮询间隔（秒）---
+intervals:
+  topic_poll_seconds: 480          # 话题动态列表轮询间隔（8分钟）
+  level1_poll_seconds: 300         # Level 1 评论轮询间隔（5分钟）
+  level2_poll_seconds: 900         # Level 2 评论轮询间隔（15分钟）
+  priority_poll_seconds: 5         # Priority 动态独立轮询间隔（秒）
+  random_delay_min: 1              # 请求间随机延迟最小值（秒）
+  random_delay_max: 3              # 请求间随机延迟最大值（秒）
+  discover_interval: 600           # 新作品发现间隔（10分钟）
+  scene2_batch_seconds: 180        # 场景二批量发送间隔（3分钟）
+  pinned_check_interval: 3600      # 置顶动态自动检测间隔（秒），1小时
+
+# --- 分级时间阈值（小时）---
+thresholds:
+  level1_hours: 24                 # Level 1 持续时间：0~24h
+  level2_hours: 120                # Level 2 持续时间：24~120h（5天）
+  archive_hours: 168               # 归档阈值：超过168h（7天）停止监测
+
+# --- 重试策略 ---
+retry:
+  max_attempts: 3                  # 最大重试次数
+  retry_wait_seconds: 50           # 重试等待时间（秒）
+  consecutive_fail_limit: 5        # 连续失败跳过阈值
+
+# --- 邮件配置 ---
+email:
+  smtp_server: "smtp.qq.com"
+  smtp_port: 465
+  use_tls: true
+  sender_email: "your_email@qq.com"
+  sender_password: "your_auth_code"     # SMTP 授权码，非 QQ 密码
+  receiver_email: "receiver@example.com"
+
+# --- 通知模式 ---
+notify:
+  immediate: true                  # 每条新互动立即发送邮件
+  daily_digest: true               # 每天发送一次汇总
+  daily_digest_hour: 22            # 汇总发送时间（24小时制，22=晚上10点）
+  prediction_idle_minutes: 120     # 预测窗口无互动自动清空间隔（分钟）
+
+# --- 截图配置（场景二原帖截图）---
+screenshot:
+  enabled: true                    # 是否启用截图模式
+  max_per_batch: 5                 # 单批最多截几张（防慢）
+  save_dir: "sent_emails"          # 截图保存目录
+  retry_interval: 600              # 截图失败补截循环间隔（秒）
+
+# --- 数据库 ---
+database:
+  path: "monitor.db"               # SQLite 数据库文件路径
+
+# --- 日志 ---
+logging:
+  level: "INFO"                    # 日志级别：DEBUG / INFO / WARNING / ERROR
+  file: "logs/echowatch.log"       # 主日志路径（logs/ 独立目录，按大小轮转 5MB×3）
