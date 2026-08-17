@@ -10,6 +10,7 @@
 
 import asyncio
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -49,6 +50,8 @@ BROWSER_CONFIG = {
 # 截图参数
 VIEWPORT_WIDTH = 700           # 匹配动态卡片宽度（非手机全屏）
 VIEWPORT_HEIGHT = 1200
+# 动态ID白名单：仅纯数字（B站动态/作品ID），防路径穿越写入异常文件
+_DYNAMIC_ID_RE = re.compile(r"^\d+$")
 DEVICE_SCALE_FACTOR = 2        # 2x Retina 高清
 BROWSER_RESTART_INTERVAL = 50  # 每 50 次截图重启浏览器
 # 动态卡片 CSS 选择器（照搬 BTCE3.0）
@@ -120,6 +123,11 @@ class Screenshotter:
         Returns:
             截图文件路径（PNG），重试后仍失败返回 None
         """
+        # 路径穿越防护：仅接受纯数字动态ID
+        if not isinstance(dynamic_id, str) or not _DYNAMIC_ID_RE.match(dynamic_id):
+            logger.warning(f"非法动态ID，跳过截图: {dynamic_id}")
+            return None
+
         await self._restart_if_needed()
 
         for attempt in range(3):

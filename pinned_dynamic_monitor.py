@@ -12,6 +12,7 @@
 """
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -94,12 +95,19 @@ def sync_pinned_id_to_config(uid: str, pinned_id: Optional[str], config_path: st
         logger.debug(f"config.yaml 中未找到 uid={uid}，跳过写入")
         return
 
+    # 原子写入：先写临时文件再 os.replace，避免写一半崩溃留下截断的配置文件
+    tmp_path = file_path.with_name(file_path.name + ".tmp")
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             yaml.dump(config_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        os.replace(tmp_path, file_path)
         logger.info(f"config.yaml 写入成功")
     except Exception as e:
         logger.warning(f"写入 config.yaml 失败: {e}")
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 # ============================================================

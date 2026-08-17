@@ -6,6 +6,7 @@ import base64
 import html
 import json
 import random
+import re
 import smtplib
 import time
 from datetime import datetime
@@ -219,19 +220,16 @@ def render_comment_html(content_text: str, rich_content_str: str = None) -> str:
     emote_map = rich.get("emote", {})
     if emote_map:
         for key, info in emote_map.items():
-            url = info.get("url", "")
+            url = _safe_url(info.get("url", ""))
             if not url:
                 continue
-            # 补全协议头
-            if url.startswith("//"):
-                url = "https:" + url
             # 根据 meta.size 选样式类：1=小表情 2=大表情
             meta = info.get("meta", {})
             size = meta.get("size", 1) if isinstance(meta, dict) else 1
             size_cls = "emote-large" if size == 2 else "emote-small"
             escaped_key = html.escape(key)
             img_tag = (
-                f'<img class="{size_cls}" src="{url}"'
+                f'<img class="{size_cls}" src="{html.escape(url)}"'
                 f' alt="{escaped_key}" title="{escaped_key}">'
             )
             msg = msg.replace(escaped_key, img_tag)
@@ -248,13 +246,14 @@ def render_comment_html(content_text: str, rich_content_str: str = None) -> str:
             src = p.get("img_src", "")
             if not src:
                 continue
-            if src.startswith("//"):
-                src = "https:" + src
             # 去掉 @后缀水印参数，获取原图
             if "@" in src:
                 src = src.split("@")[0]
+            src = _safe_url(src)
+            if not src:
+                continue
             imgs_parts.append(
-                f'<img class="comment-image" src="{src}" alt="评论图片">'
+                f'<img class="comment-image" src="{html.escape(src)}" alt="评论图片">'
             )
         if imgs_parts:
             pictures_html = (
@@ -267,12 +266,12 @@ def render_comment_html(content_text: str, rich_content_str: str = None) -> str:
     jump_urls = rich.get("jump_url", {})
     if jump_urls:
         for key_text, jump_info in jump_urls.items():
-            pc_url = jump_info.get("pc_url", "")
+            pc_url = _safe_url(jump_info.get("pc_url", ""))
             title = jump_info.get("title", key_text)
             escaped_key = html.escape(key_text)
             if pc_url and escaped_key in msg:
                 link_tag = (
-                    f'<a href="{pc_url}" class="jump-link"'
+                    f'<a href="{html.escape(pc_url)}" class="jump-link"'
                     f' target="_blank">{html.escape(title)}</a>'
                 )
                 msg = msg.replace(escaped_key, link_tag)
@@ -285,6 +284,30 @@ def _escape_text(text: str) -> str:
     if not text:
         return ""
     return html.escape(text).replace("\n", "<br>")
+
+
+def _safe_url(url: str, default: str = "") -> str:
+    """
+    仅允许 http/https 协议的 URL，其它一律返回 default。
+    防 javascript: / data: / vbscript: 等协议注入（用于 img src 与 a href）。
+    """
+    if not url:
+        return default
+    url = url.strip()
+    if url.startswith("//"):
+        url = "https:" + url
+    if url.lower().startswith(("http://", "https://")):
+        return url
+    return default
+
+
+def _safe_filename(name: str, max_len: int = 100) -> str:
+    """清洗文件名：仅保留安全字符，防路径穿越/特殊字符注入"""
+    if not name:
+        return "unnamed"
+    cleaned = re.sub(r'[^\w.\-\u4e00-\u9fff]', "_", name)
+    cleaned = cleaned.strip("._")
+    return cleaned[:max_len] or "unnamed"
 
 
 # ============================================================
@@ -419,18 +442,16 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
                     rich = json.loads(post_rich_content)
                     video = rich.get("video", {})
                     if video.get("title"):
-                        cover = video.get("cover", "")
-                        if cover and cover.startswith("//"):
-                            cover = "https:" + cover
+                        cover = _safe_url(video.get("cover", ""))
                         vid = video.get("aid", "") or video.get("bvid", "")
                         video_url = f"https://www.bilibili.com/video/av{vid}" if vid else ""
                         video_html = f"""
                     <div class="post-video">
                         <div class="label">原帖视频</div>
                         <div class="video-body">
-                            {f'<img class="video-cover" src="{cover}" alt="视频封面">' if cover else ''}
+                            {f'<img class="video-cover" src="{html.escape(cover)}" alt="视频封面">' if cover else ''}
                             <div class="video-title">{html.escape(video['title'])}</div>
-                            {f'<a class="btn" href="{video_url}" target="_blank" style="font-size:11px;margin-top:6px">观看视频</a>' if video_url else ''}
+                            {f'<a class="btn" href="{html.escape(video_url)}" target="_blank" style="font-size:11px;margin-top:6px">观看视频</a>' if video_url else ''}
                         </div>
                     </div>"""
                 except (json.JSONDecodeError, TypeError):
@@ -448,7 +469,7 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
         parent_html = render_comment_html(parent_content, interaction.get("parent_rich_content"))
         context_html = f"""
         <div class="context-box">
-            <strong>{parent_author}</strong>：{parent_html}
+            <strong>{html.escape(parent_author)}</strong>：{parent_html}
         </div>"""
 
     like_html = ""
@@ -461,19 +482,20 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
     )
 
     trace = f"cid={rpid} | scene={scene} | {theme['primary']}→{theme['secondary']}"
+    safe_up = html.escape(up_name)
     return f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8">{_base_style(theme)}</head>
 <body>
 <div class="container">
     <div class="header">
         <h1>EchoWatch · 留声</h1>
-        <p>留住「{up_name}」的真心与回响</p>
+        <p>留住「{safe_up}」的真心与回响</p>
     </div>
     <div class="content">
         <div class="stats">
-            <span>UP主：<strong>{up_name}</strong></span>
+            <span>UP主：<strong>{safe_up}</strong></span>
             <span>场景：{scene_name}</span>
-            <span>时间：{discovered_at}</span>
+            <span>时间：{html.escape(discovered_at)}</span>
         </div>
         <div class="interaction">
             <span class="badge">{reply_type}</span>{like_html}
@@ -481,16 +503,16 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
             {context_html}
             <div class="text">{content_html}</div>
             <div style="margin-top:12px">
-                <a class="btn" href="{comment_url}" target="_blank">评论直达</a>
-                <a class="btn" href="{item_url}" target="_blank" style="opacity:0.8">作品页面</a>
+                <a class="btn" href="{html.escape(comment_url)}" target="_blank">评论直达</a>
+                <a class="btn" href="{html.escape(item_url)}" target="_blank" style="opacity:0.8">作品页面</a>
             </div>
         </div>
     </div>
     <div class="footer">
         <div class="footer-divider"></div>
-        EchoWatch · 留住「{up_name}」的真心与回响<br>
+        EchoWatch · 留住「{safe_up}」的真心与回响<br>
         此邮件由自动化系统发送<br>
-        <span style="font-size:10px;color:#aaa;">追踪: {trace}</span>
+        <span style="font-size:10px;color:#aaa;">追踪: {html.escape(trace)}</span>
     </div>
 </div>
 </body></html>"""
@@ -550,18 +572,16 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
                             rich = json.loads(pr)
                             video = rich.get("video", {})
                             if video.get("title"):
-                                cover = video.get("cover", "")
-                                if cover and cover.startswith("//"):
-                                    cover = "https:" + cover
+                                cover = _safe_url(video.get("cover", ""))
                                 vid = video.get("aid", "") or video.get("bvid", "")
                                 video_url = "https://www.bilibili.com/video/av" + vid if vid else ""
                                 video_html = (
                                     '<div class="post-video">'
                                     '<div class="label">原帖视频</div>'
                                     '<div class="video-body">'
-                                    + ('<img class="video-cover" src="' + cover + '" alt="视频封面">' if cover else '')
+                                    + ('<img class="video-cover" src="' + html.escape(cover) + '" alt="视频封面">' if cover else '')
                                     + '<div class="video-title">' + html.escape(video["title"]) + '</div>'
-                                    + ('<a class="btn" href="' + video_url + '" target="_blank" style="font-size:11px;margin-top:6px">观看视频</a>' if video_url else '')
+                                    + ('<a class="btn" href="' + html.escape(video_url) + '" target="_blank" style="font-size:11px;margin-top:6px">观看视频</a>' if video_url else '')
                                     + '</div></div>'
                                 )
                         except (json.JSONDecodeError, TypeError):
@@ -572,7 +592,7 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         if is_sub and parent_author:
             # 被回复内容也用富内容渲染（表情包/图片），parent_rich_content 为空时退化为纯文本
             parent_html = render_comment_html(parent_content, interaction.get("parent_rich_content"))
-            context_html = f'<div class="context-box"><strong>{parent_author}</strong>：{parent_html}</div>'
+            context_html = f'<div class="context-box"><strong>{html.escape(parent_author)}</strong>：{parent_html}</div>'
 
         like_badge = '<span class="badge">UP觉得很赞</span>' if up_liked else ""
         scene_badge = f'<span class="badge">{scene_name}</span>'
@@ -585,8 +605,8 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         items_html += f"""
         <div class="interaction">
             <div class="label" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">
-                <span>#{i+1} {discovered_at} {scene_badge} {like_badge} {reply_type}</span>
-                <a class="btn" href="{comment_url}" target="_blank" style="padding:3px 12px; font-size:11px; margin-right:0">评论直达</a>
+                <span>#{i+1} {html.escape(discovered_at)} {scene_badge} {like_badge} {reply_type}</span>
+                <a class="btn" href="{html.escape(comment_url)}" target="_blank" style="padding:3px 12px; font-size:11px; margin-right:0">评论直达</a>
             </div>
             {post_context_html}
             {context_html}
@@ -594,6 +614,7 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         </div>"""
 
     trace = f"{today_str} · 共{len(interactions)}条 | {theme['primary']}→{theme['secondary']}"
+    safe_up = html.escape(up_name)
 
     return f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8">{_base_style(theme)}</head>
@@ -601,11 +622,11 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
 <div class="container">
     <div class="header">
         <h1>EchoWatch · 留声</h1>
-        <p>{header_title}</p>
+        <p>{html.escape(header_title)}</p>
     </div>
     <div class="content">
         <div class="stats">
-            <span>UP主：<strong>{up_name}</strong></span>
+            <span>UP主：<strong>{safe_up}</strong></span>
             <span>本轮互动：<strong>{len(interactions)} 条</strong></span>
             {f'<span>今日累计：<strong>{today_count} 条</strong></span>' if today_count is not None else ''}
         </div>
@@ -613,9 +634,9 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
     </div>
     <div class="footer">
         <div class="footer-divider"></div>
-        EchoWatch · 留住「{up_name}」的真心与回响<br>
+        EchoWatch · 留住「{safe_up}」的真心与回响<br>
         此邮件由自动化系统发送<br>
-        <span style="font-size:10px;color:#aaa;">追踪: {trace}</span>
+        <span style="font-size:10px;color:#aaa;">追踪: {html.escape(trace)}</span>
     </div>
 </div>
 </body></html>"""
@@ -632,7 +653,7 @@ def _archive_email(filename: str, html: str):
     """将已发送的邮件HTML保存到 sent_emails/ 目录留档"""
     try:
         SENT_DIR.mkdir(parents=True, exist_ok=True)
-        filepath = SENT_DIR / filename
+        filepath = SENT_DIR / _safe_filename(filename)
         filepath.write_text(html, encoding="utf-8")
         logger.info(f"邮件已留档: {filename}")
     except Exception as e:
@@ -765,19 +786,19 @@ class Notifier:
   <div style="background:linear-gradient(135deg,{theme['primary']},{theme['secondary']});
               {theme['texture']};padding:28px 24px;text-align:center;">
     <h1 style="color:#fff;margin:0;font-size:20px;text-shadow:0 1px 3px rgba(0,0,0,0.2);">
-      {title_text}
+      {html.escape(title_text)}
     </h1>
   </div>
   <div style="padding:24px;">
     <p style="font-size:15px;color:#333;line-height:1.8;margin:0 0 16px;">
-      {desc_text}
+      {html.escape(desc_text)}
     </p>
     <table style="width:100%;border-collapse:collapse;font-size:14px;">
       <tr>
         <td style="padding:10px 12px;background:#f9f9f9;color:#666;border-radius:6px 0 0 6px;width:80px;">
           UP主
         </td>
-        <td style="padding:10px 12px;">{up_name} (UID:{up_uid})</td>
+        <td style="padding:10px 12px;">{html.escape(up_name)} (UID:{html.escape(up_uid)})</td>
       </tr>"""
 
         if old_id:
@@ -785,7 +806,7 @@ class Notifier:
       <tr>
         <td style="padding:10px 12px;background:#f9f9f9;color:#666;">旧置顶</td>
         <td style="padding:10px 12px;">
-          <a href="{old_link}" style="color:{theme['primary']};">{old_id}</a>
+          <a href="{html.escape(old_link)}" style="color:{theme['primary']};">{html.escape(old_id)}</a>
         </td>
       </tr>"""
 
@@ -794,7 +815,7 @@ class Notifier:
       <tr>
         <td style="padding:10px 12px;background:#f9f9f9;color:#666;">新置顶</td>
         <td style="padding:10px 12px;">
-          <a href="{new_link}" style="color:{theme['primary']};font-weight:bold;">{new_id}</a>
+          <a href="{html.escape(new_link)}" style="color:{theme['primary']};font-weight:bold;">{html.escape(new_id)}</a>
         </td>
       </tr>"""
 

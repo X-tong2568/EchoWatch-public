@@ -61,6 +61,8 @@ HEADERS = {
 MIXIN_KEY_TTL = 3600
 # 动态列表缓存有效期（秒）：风控期间用最近一次成功结果兜底，超时视为过期
 DYN_CACHE_MAX_AGE = 3600
+# buvid3 获取失败后的重试节流间隔（秒）：避免每次API调用都打B站首页
+BUVID_RETRY_INTERVAL = 60
 # 子评论每页条数（与B站前端一致，ps=10 比 20 更稳，实测可完整翻页）
 SUB_COMMENT_PAGE_SIZE = 10
 
@@ -332,6 +334,7 @@ class BiliClient:
         self._mixin_key: Optional[str] = None
         self._mixin_key_ts: float = 0
         self._buvid_ready: bool = False
+        self._buvid_failed_at: float = 0.0  # 上次获取buvid失败时间（节流重试用）
         self._session_lock = asyncio.Lock()
         self._topic_sort_by_cache: dict[int, int] = {}  # topic_id → "最新"排序值
         self._dyn_cache: dict[str, tuple] = {}  # uid → (时间戳, 动态列表)，风控兜底用
@@ -386,8 +389,10 @@ class BiliClient:
         logger.info("HTTP会话已关闭")
 
     async def _ensure_buvid(self):
-        """访问B站首页获取buvid3等匿名Cookie，仅需一次，失败不阻塞"""
+        """访问B站首页获取buvid3等匿名Cookie，成功后不再重复；失败按 BUVID_RETRY_INTERVAL 节流重试，不阻塞"""
         if self._buvid_ready:
+            return
+        if time.time() - self._buvid_failed_at < BUVID_RETRY_INTERVAL:
             return
         try:
             session = await self._get_session()
@@ -400,7 +405,7 @@ class BiliClient:
             logger.debug("buvid3匿名Cookie已获取")
         except Exception as e:
             logger.warning(f"获取buvid失败: {e}")
-            self._buvid_ready = True  # 不反复重试
+            self._buvid_failed_at = time.time()
 
     async def _fetch_mixin_key(self) -> str:
         """

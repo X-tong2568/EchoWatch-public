@@ -44,6 +44,7 @@ class Scheduler:
 
         self.running = True
         self._digest_sent_today = False  # 防止同一天重复发日报
+        self._tasks: list = []  # 记录所有调度任务，供 stop() 统一取消
 
     # ==========================================================
     # 主入口
@@ -81,12 +82,26 @@ class Scheduler:
         tasks.append(asyncio.create_task(self._immediate_notify_loop()))
         logger.info("通用调度任务已启动 (归档+日报+场景一即时通知)")
 
+        self._tasks = tasks
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error(f"调度器异常: {e}")
+
+    async def stop(self):
+        """
+        停止调度：置 running=False 并取消所有任务，等待其退出。
+        调用方应在关闭数据库/HTTP会话之前调用，避免任务访问已关闭资源。
+        """
+        self.running = False
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks = []
 
     # ==========================================================
     # 场景一 调度循环

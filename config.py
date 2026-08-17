@@ -184,7 +184,7 @@ if __name__ == "__main__":
         print(f"[OK] 配置加载成功")
         print(f"   UP主数量: {len(cfg.up_list)}")
         for up in cfg.up_list:
-            print(f"   - {up.name} (UID: {up.uid}) 话题: {up.topics} 优先动态: {up.priority_dynamics} 模式: {up.priority_mode}")
+            print(f"   - {up.name} (UID: {up.uid}) 话题: {up.topics} 优先动态: {up.priority_dynamics}")
         print(f"   DB路径: {cfg.database.path}")
         print(f"   场景一: {'开' if cfg.monitor.scene1_enabled else '关'}")
         print(f"   场景二: {'开' if cfg.monitor.scene2_enabled else '关'}")

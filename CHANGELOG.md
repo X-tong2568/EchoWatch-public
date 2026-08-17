@@ -4,6 +4,34 @@ EchoWatch（留声）版本更新记录。
 
 ---
 
+### 补充修复（2026-08-18，未打版本 tag）：邮件 HTML 注入与路径穿越安全加固 + 6 项修复
+
+**问题**：邮件模板中 UP主昵称、父评论作者、发现时间等外部可控字段直接拼入 HTML，
+恶意内容可注入 script 标签或 javascript: 协议链接；动态 ID 未经校验直接拼入截图/归档文件名，
+存在路径穿越写入风险；另有退出清理顺序、buvid 失败重试、配置写入原子性等隐患。
+
+**修复**：
+- **邮件 HTML 注入**：新增 `_safe_url()`（仅放行 http/https，拦截 javascript:/data:/vbscript:）与
+  `_safe_filename()`（文件名白名单清洗）；外部可控字段（parent_author、up_name、up_uid、时间、
+  标题/描述、追踪信息等）全部 `html.escape`，img src / a href 属性位全量转义
+- **路径穿越**：`take_dynamic_screenshot()` 入口校验 dynamic_id 必须为纯数字（`^\d+$`），
+  非法直接返回 None；邮件归档文件名统一走 `_safe_filename()` 清洗
+- **退出清理**：Scheduler 新增 `stop()`（取消全部调度任务并等待退出）；main 的 finally 顺序修正为
+  scheduler.stop() → client.close()（补齐漏关的 BiliClient）→ db.close() → screenshotter.stop()
+- **config.py 测试入口**：删除不存在的 `up.priority_mode` 引用，消除 AttributeError
+- **预测窗口死代码**：`_check_prediction_clear()` 改为按 `topic_offset.updated_at` 判断空闲时长，
+  删除「当天无互动就永远不清空」的无效分支
+- **buvid 失败节流**：获取失败不再永久标记 ready，改为 60s 节流重试，避免每次 API 调用都打 B站首页
+- **配置原子写入**：config.yaml 改为先写 `.tmp` 再 `os.replace()` 原子替换，失败时清理临时文件
+
+#### Claude (AI Assistant) 的贡献
+
+- **安全加固**：邮件模板注入面梳理与转义、URL 协议白名单、文件名清洗、截图动态 ID 校验
+- **缺陷修复**：退出清理顺序、buvid 失败节流、配置原子写入、预测窗口死代码移除
+- **验证**：逐项行为测试（注入用例、路径穿越用例、原子写入实测、语法编译检查）
+
+---
+
 ## v1.7.0 (2026-08-15) — 日志轮转系统：logs 独立目录 + error.log 分离 + 3 天自动清理
 
 ### 背景
@@ -92,6 +120,7 @@ EchoWatch（留声）版本更新记录。
 - scene1/scene2 的 root_context 与子评论查找表均携带 rich_content
 - 单封邮件与汇总模板对被回复内容统一走 `render_comment_html`（表情/图片可见）
 
+
 ### 部署
 
 - 代码文件 7 个：`bili_client.py` `config.py` `database.py` `email_notifier.py`
@@ -163,11 +192,12 @@ EchoWatch（留声）版本更新记录。
 ## v1.4.0 (2026-08-09) — 评论翻页 -400 重试风暴修复 + 子评论检测基线节流
 
 ### 问题（线上事故复盘）
-priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未检出，排查发现三级根因链：
+置顶动态一条根评论（某根评论）的 UP 子回复（08-10 11:11 发布）漏检，排查发现
+主评论翻页第 2 页起必 -400 的**真根因**（v1.4.0 误判为"实际仅一页的评论区传游标才 -400"）：
 
 1. **主评论翻页 -400 触发 150s 重试风暴**：B 站 `x/v2/reply/wbi/main` 对部分评论区（实际仅一页）的翻页游标 `pagination_str` 返回 `-400 请求错误`。`get_comments` 带 `async_retry(API_RETRY)`（50s×3），每次翻页失败卡 150 秒
 2. **`poll_priority_only` 无防重入锁**：priority 轮询每 1~5s 启动一轮，上一轮卡在 150s 重试期间新轮继续堆积 → 并发请求风暴 → 触发 B 站风控（-412），风暴期间子评论检查无法完成
-3. **子评论翻页上限 5 页（100 条）**：107 条子评论的"大楼"（某置顶动态）尾部 7 条（含 UP 回复）永远取不到，6 小时后才补检
+3. **子评论翻页上限 5 页（100 条）**：107 条子评论的"大楼"（111222333444）尾部 7 条（含 UP 回复）永远取不到，6 小时后才补检
 
 ### 修复（4 项）
 | 修复 | 文件 |
@@ -195,6 +225,10 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 | `monitor_scene1.py` | 修改 — priority 锁 + 子评论 10 页 + 基线节流 |
 | `monitor_scene2.py` | 修改 — disabled 跳过 1 小时 + 子评论 10 页 + 基线节流 |
 
+### XTong 的贡献
+- **事故定位**：提供具体根评论链接追踪漏检邮件，确认 2min 子评论延迟可接受
+- **方案设计**：基线入库（只更新值不记历史）+ rcount 变大与 2min 间隔双重触发条件
+
 ### Claude (AI Assistant) 的贡献
 - **根因排查**：服务器实测定位三级根因链（-400 重试风暴 → 无锁并发堆积 → 翻页上限截断）
 - **实现**：4 项修复 + 基线节流落地，本地单测与服务器部署验证
@@ -213,6 +247,9 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 | 文件 | 变化 |
 |------|------|
 | `email_notifier.py` | 修改 — 按钮移入头部行 + flex 布局 |
+
+### XTong 的贡献
+- **方案提出**：评论直达按钮应和条目头部信息同一行
 
 ### Claude (AI Assistant) 的贡献
 - **实现**：flex 头部行 + 内联小按钮落地，语法编译验证通过
@@ -241,6 +278,9 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 | `config.py` / `config.yaml` / `config.example.yaml` | 修改 — retry_interval 配置 |
 | `main.py` | 修改 — scheduler 注入截图器 |
 
+### XTong 的贡献
+- **方案提出**：新入库截图失败应标记动态并等待下次补截
+
 ### Claude (AI Assistant) 的贡献
 - **实现**：标记/补截/发送前兜底三层机制落地，本地模拟验证全流程（失败保留标记、重试成功清标记）
 
@@ -263,6 +303,9 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 | 文件 | 变化 |
 |------|------|
 | `screenshotter.py` | 修改 — 种 cookie + 412 检测 + 显式代理 + 重试间隔 |
+
+### XTong 的贡献
+- **问题发现**：指出场景2动态截图会截到 412 页面
 
 ### Claude (AI Assistant) 的贡献
 - **排查 + 修复**：本地实测定位真实根因（无 cookie 登录遮罩而非 412），落地种 cookie + 检测兜底组合方案
@@ -288,6 +331,9 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 | `scheduler.py` | 修改 — 删除置顶消失清除分支 |
 | `monitor_scene1.py` | 修改 — 无置顶ID时保留旧 priority 标记 |
 
+### XTong 的贡献
+- **问题发现**：收到"置顶取消"邮件，指出正确逻辑应为"新替旧 + L1/L2 重新分级"，不允许空白替换
+
 ### Claude (AI Assistant) 的贡献
 - **排查 + 修复**：服务器日志确认 19:39 漏检→取消邮件、20:39 复检→首次发现邮件的时间线，落地"新替旧"原则
 
@@ -311,6 +357,9 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 | `email_notifier.py` | 修改 — 汇总邮件 stats 本轮+今日累计双显示，批量/日报查询今日累计 |
 | `scheduler.py` | 修改 — 日报调用传入 `up.uid` |
 
+### XTong 的贡献
+- **问题发现**：邮件「今日互动」条数与本轮不一致，应为累加的今日总量
+
 ### Claude (AI Assistant) 的贡献
 - **排查 + 实现 + 部署**：定位统计语义问题，接入 `get_today_interactions` 按 UP 累加，已部署服务器并确认服务正常
 
@@ -331,6 +380,9 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 | `screenshotter.py` | 修改 — 元素级截图替代全页截图，视口缩至 700×1200 |
 | `email_notifier.py` | 修改 — 新增 `.screenshot img` CSS + `_embed_screenshot` 包裹容器 |
 
+### XTong 的贡献
+- **需求**：截图范围精准化（动态卡片 vs 整个网页）+ 邮件中图片适当缩放
+
 ### Claude (AI Assistant) 的贡献
 - **实现**：参照 BTCE3.0 `monitor.py` 卡片截图逻辑，定位元素截图 + CSS 缩放方案
 
@@ -350,6 +402,9 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 - `_sync_priority_dynamics` 清除旧 priority 后立即调用 `recheck_all_levels` 重新分级
 - `clear_stale_priority` 支持空 `keep_ids`（清除全部 priority 标记）
 - `get_unnotified_immediate` 调用加上 `scene="scene1"` 过滤
+
+### XTong 的贡献
+- **问题发现**：通过云服务器邮件推送定位到同一 comment_id 1秒内双邮件
 
 ### Claude (AI Assistant) 的贡献
 - **排查 + 实现**：追踪并发竞争路径，修复 3 个文件 7 处改动
@@ -376,6 +431,9 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 | `bili_client.py` | 修改 — 置顶检测加重试，区分 API 失败与无置顶 |
 | `pinned_dynamic_monitor.py` | 修改 — API 失败跳过本轮，防误判置顶消失 |
 | `screenshotter.py` | 修改 — 截图重试兜底 + 浏览器崩溃重建 + logger 接入项目日志 |
+
+### XTong 的贡献
+- **问题发现**：发现UP主更换置顶后轮询频率仍是 L1，Priority 未自动切换
 
 ### Claude (AI Assistant) 的贡献
 - **排查 + 修复 + 部署**：定位 -412 风控根因与重试失效链路，代理配置 + 手动数据同步 + 代码加固
@@ -409,6 +467,10 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 | `email_notifier.py` | 修改 — 新增 `send_pinned_change()` |
 | `.gitignore` | 修改 — 新增 `pinned_dynamic_state.json` |
 
+### XTong 的贡献
+- **需求**：当前 Priority 地址手动指定，需参照 BTCE 加上自动监测与变更通知
+- **架构决策**：全自动模式（不区分手动/自动），API 自动发现置顶 + config 兜底
+
 ### Claude (AI Assistant) 的贡献
 - **实现**：`pinned_dynamic_monitor.py` 核心模块、`bili_client.get_pinned_dynamic_id()`、scheduler 置顶检测循环、email 置顶变更通知、config.yaml 自动回写
 - **文档**：README/CHANGELOG v1.3.0 更新
@@ -440,6 +502,11 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 | `main.py` | 修改 — 截图器在 Scene2Monitor 之前初始化 |
 | `requirements.txt` | 修改 — 新增 `playwright>=1.40.0` |
 
+### XTong 的贡献
+- **需求**：场景二原帖文本提取不稳定，改为 Playwright 截图嵌入邮件
+- **架构决策**：截图放在入库时而非发邮件时，邮件端零等待
+- **部署**：确认服务器已有 Playwright，指定截图参数 1080×1920 + 2x Retina
+
 ### Claude (AI Assistant) 的贡献
 - **实现**：`screenshotter.py` 截图模块（搬运 [BTCE](https://github.com/X-tong2568/BTCE) 配置）、monitor_scene2 入库截图、email_notifier 截图嵌入+路径推导+降级逻辑
 - **配置**：`ScreenshotConfig` 数据类 + config.yaml 截图配置段
@@ -461,6 +528,9 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
   - `database.py` `monitored_items` 新增 `post_rich_content TEXT` 列
   - `email_notifier.py` 原帖区域改用 `render_comment_html()` 渲染（表情 `<img>` + 图片 flex 容器），视频独立渲染为封面+标题+链接卡片
 - 渲染模板复用：帖子富内容 JSON 结构与评论 rich_content 完全兼容，无需新写渲染函数
+
+### XTong 的贡献
+- **需求**：场景二原帖需展示表情、图片、视频，不能只看文字
 
 ### Claude (AI Assistant) 的贡献
 - **实现**：`_extract_post_rich_content()` 提取函数、全链路数据传递、富内容邮件渲染、视频卡片 CSS
@@ -484,6 +554,9 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 #### 配置变更
 - `intervals` 新增 `scene2_batch_seconds: 180`（场景二批量发送间隔，可调）
 
+### XTong 的贡献
+- **需求**：场景二邮件需展示原帖内容 + 批量合并发送
+
 ### Claude (AI Assistant) 的贡献
 - **实现**：原帖正文全链路（提取→入库→邮件渲染）、场景二批量合并（scheduler + email_notifier + database）、`_get_item_type` 修复
 - **文档**：README v1.0.3 版本演进表、CHANGELOG 更新
@@ -498,6 +571,9 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 - **架构调整**：`Scene1Monitor` 注入 `Notifier` 引用，priority 轮询结束后直接调 `send_immediate` 发邮件
 - 普通场景1/场景2 互动保持不变，继续走 30s 定时扫库
 - 日报机制不变
+
+### XTong 的贡献
+- **需求**：提出 priority 发现后立即推送，不走队列等待
 
 ### Claude (AI Assistant) 的贡献
 - **实现**：`database.py` 返回值改造、`monitor_scene1.py` 即时推送逻辑、`main.py` 构造顺序调整
@@ -537,6 +613,10 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 - 服务器部署 Mihomo v1.19.29 + cron 每小时重启（节点轮换 + 订阅刷新）
 - 双层保护：120s 健康检查 + 1 小时定时重启
 
+### XTong 的贡献
+- **运维**：提供梯子订阅链接与配置，服务器部署验证
+- **需求**：Priority 高频轮询、置顶评论检测、L0 唯一性约束
+
 ### Claude (AI Assistant) 的贡献
 - **实现**：全部 Python 代码修复（bili_client / database / monitor_scene1 / monitor_scene2 / scheduler / config）
 - **部署**：Mihomo 安装配置、systemd 服务、cron 定时重启
@@ -556,6 +636,9 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 - 服务器部署 Mihomo v1.19.29，使用 VLESS 节点（TCP 协议兼容 Python SSL）
 - 代理监听 `127.0.0.1:7890`（HTTP + SOCKS5 混合端口），仅本机使用
 - `systemd` 管理 Mihomo 服务，开机自启
+
+### XTong 的贡献
+- **运维**：提供梯子订阅链接，服务器部署与验证
 
 ### Claude (AI Assistant) 的贡献
 - **部署**：Mihomo 安装、配置、systemd 服务搭建
@@ -581,6 +664,12 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 - **免责声明**：新增免责声明
 - **测试**：`tests/test_bili_client.py`（4 个单测 + 4 个集成测试）
 
+### XTong 的贡献
+- **需求**：推动零 Cookie 方案，提供 `bili-api-guide.md` 技术文档
+- **调研**：发现开源参考项目 `Bilibili-load-comment`，验证方案可行性
+- **设计**：分级策略、预测窗口机制、通知方案、架构审核
+- **测试**：API 调试、端到端验证、邮件接收确认
+
 ### Claude (AI Assistant) 的贡献
 - **架构**：模块设计、WBI 签名实现、API 适配层
 - **实现**：重写 `bili_client.py`（纯 aiohttp + WBI），更新 monitors/scheduler/main
@@ -600,6 +689,12 @@ priority 动态下一条根评论（某根评论）的 UP 子回复 6 小时未�
 - 基于实际发布时间（pub_ts）的精确分级
 - HSL 随机配色邮件模板
 - SQLite 持久化 + WAL 模式 + 断点续跑
+
+### XTong 的贡献
+- **需求**：项目定位、监测场景设计、BTCE3.0 项目参考
+- **设计**：分级策略、预测窗口机制、通知方案、架构审核
+- **测试**：API 调试、端到端验证、邮件接收确认
+- **部署**：服务器环境准备、Cookie 管理
 
 ### Claude (AI Assistant) 的贡献
 - **架构**：模块设计、数据库 Schema、API 封装

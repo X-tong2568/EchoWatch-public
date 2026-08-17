@@ -119,9 +119,9 @@ async def main():
     except KeyboardInterrupt:
         logger.info("用户中断")
     finally:
-        scheduler.running = False
-        # 等待所有任务退出
-        await asyncio.sleep(1)
+        # 先取消并等待所有调度任务退出，再关闭资源（避免任务访问已关闭的数据库）
+        await scheduler.stop()
+        await client.close()
         await db.close()
         if screenshotter:
             await screenshotter.stop()

@@ -636,6 +636,14 @@ class Database:
         )
         return row[0]["last_interacted_dynamic_id"] if row else None
 
+    async def get_last_interacted_ts(self, topic_id: int) -> Optional[str]:
+        """获取话题最近一次互动/偏移量写入时间（预测窗口清空判断用）"""
+        row = await self._conn.execute_fetchall(
+            "SELECT updated_at FROM topic_offset WHERE topic_id = ?",
+            (topic_id,)
+        )
+        return row[0]["updated_at"] if row else None
+
     async def set_last_interacted(self, topic_id: int, dynamic_id: str):
         """更新话题中 UP主 最近互动位置"""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

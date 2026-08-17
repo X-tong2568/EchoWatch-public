@@ -529,7 +529,8 @@ class Scene2Monitor:
         如果超过 PREDICTION_IDLE_CLEAR_MINUTES 无新互动，清空 last_interacted。
 
         策略：读取 topic_offset.updated_at（即 set_last_interacted 的写入时间），
-        判断距上次互动是否超时。
+        判断距上次互动是否超时。不再依赖"今天是否有互动记录"——原实现是死代码，
+        当天无互动时窗口永远不会被清空。
         """
         threshold = timedelta(minutes=PREDICTION_IDLE_CLEAR_MINUTES)
         for topic_id in up.topics:
@@ -537,26 +538,17 @@ class Scene2Monitor:
             if not last_id:
                 continue
 
-            # 检查场景二最近的互动时间
-            today = datetime.now().strftime("%Y-%m-%d")
-            recent = await self.db.get_today_interactions(up.uid)
-            scene2_recent = [i for i in recent if i.get("scene") == "scene2"]
-            if not scene2_recent:
-                # 今天无场景二互动 → 检查昨天或更早的互动记录
-                yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-                older = await self.db.get_today_interactions(up.uid)  # 实际上是按 discovered_at 查
-                # 直接查最近一条场景二互动
-                continue  # 保留预测窗口（不轻易清空）
-
-            last_time_str = scene2_recent[-1].get("discovered_at", "")
+            last_ts = await self.db.get_last_interacted_ts(topic_id)
+            if not last_ts:
+                continue
             try:
-                last_time = datetime.strptime(last_time_str, "%Y-%m-%d %H:%M:%S")
-                elapsed = datetime.now() - last_time
-                if elapsed > threshold:
-                    logger.info(f"[{up.name}] 预测窗口清空 (topic={topic_id}, 距上次互动 {elapsed})")
-                    await self.db.set_last_interacted(topic_id, "")
+                last_time = datetime.strptime(last_ts, "%Y-%m-%d %H:%M:%S")
             except (ValueError, TypeError):
-                pass
+                continue
+            elapsed = datetime.now() - last_time
+            if elapsed > threshold:
+                logger.info(f"[{up.name}] 预测窗口清空 (topic={topic_id}, 距上次互动 {elapsed})")
+                await self.db.set_last_interacted(topic_id, "")
 
 
 # ============================================================
