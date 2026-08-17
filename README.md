@@ -79,6 +79,12 @@ python main.py
 
 > 场景二互动与 Priority 子评论采用**批量合并发送**（默认每3分钟一封），避免频繁收到多封邮件。
 
+![邮件通知示例](邮件通知示例.png)
+
+## 系统架构
+
+![EchoWatch 系统架构](echowatch_architecture_diagram.png)
+
 ## 分级策略
 
 | 级别 | 时间范围 | 轮询间隔 | 说明 |
