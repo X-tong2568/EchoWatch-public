@@ -121,8 +121,13 @@ class Scene2Monitor:
                                 logger.warning(f"入库截图失败，已标记待补截 ({dyn_id}): {e}")
                     else:
                         # 遇到已入库的帖子 → 停止翻页（说明追上了历史）
+                        # 注意：不能用 break 中断本页遍历 —— 若某条动态曾被 continue 跳过
+                        # （接口字段波动/跨场景去重），它会排在已入库条目之后；
+                        # break 会导致它永远不被补检（后续每轮第一页第一条即已入库 → 直接停）。
+                        # 改为 continue：本页剩余条目全部检查完，仅阻止翻页，
+                        # 保证漏检条目只要还在本页就能被补抓入库。
                         stop_paging = True
-                        break
+                        continue
 
                 # 取下一页的 offset；无更多数据则停止
                 offset = cards_resp.get("offset", "")
