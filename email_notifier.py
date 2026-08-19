@@ -487,13 +487,14 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
     if up_liked:
         like_html = '<span class="badge">UP觉得很赞</span>'
 
-    # 渲染评论内容（文字+表情+图片）
+    # 渲染评论内容（文字+表情+图片），前加【UP名】标签便于识别互动来源
+    safe_up = html.escape(up_name)
     content_html = render_comment_html(
         content, interaction.get("rich_content")
     )
+    up_tag = f'<span class="badge">【{safe_up}】</span>'
 
     trace = f"cid={rpid} | scene={scene} | {theme['primary']}→{theme['secondary']}"
-    safe_up = html.escape(up_name)
     return f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8">{_base_style(theme)}</head>
 <body>
@@ -512,7 +513,7 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
             <span class="badge">{reply_type}</span>{like_html}
             {post_context_html}
             {context_html}
-            <div class="text">{content_html}</div>
+            <div class="text">{up_tag}{content_html}</div>
             <div style="margin-top:12px">
                 <a class="btn" href="{html.escape(comment_url)}" target="_blank">评论直达</a>
                 <a class="btn" href="{html.escape(item_url)}" target="_blank" style="opacity:0.8">作品页面</a>
@@ -613,7 +614,8 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         # 主评论/子评论也打徽章（与单封邮件一致）
         reply_badge = f'<span class="badge">{reply_type}</span>'
 
-        # 渲染评论内容（文字+表情+图片）
+        # 渲染评论内容（文字+表情+图片），前加【UP名】标签便于识别互动来源
+        up_tag = f'<span class="badge">【{html.escape(up_name)}】</span>'
         content_html = render_comment_html(
             content, interaction.get("rich_content")
         )
@@ -626,7 +628,7 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
             </div>
             {post_context_html}
             {context_html}
-            <div class="text">{content_html}</div>
+            <div class="text">{up_tag}{content_html}</div>
         </div>"""
 
     # 追踪信息：批量邮件补上 cid（场景三无单封邮件，靠此定位评论）
