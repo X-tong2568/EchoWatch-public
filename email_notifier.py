@@ -161,26 +161,45 @@ def random_theme() -> dict:
 # 评论链接生成
 # ============================================================
 
-def build_comment_url(item_id: str, item_type: str, rpid) -> str:
+def _resolve_aid(item_id: str, aid: str) -> str:
+    """
+    解析真实 aid：优先取 comment_oid 传入值；
+    缺省时剥 item_id 的 av 前缀（空间动态 API 风控降级路径的产物，如 av117032272005640）。
+    """
+    if aid:
+        return aid
+    if item_id.startswith("av") and item_id[2:].isdigit():
+        return item_id[2:]
+    return ""
+
+
+def build_comment_url(item_id: str, item_type: str, rpid, aid: str = "") -> str:
     """
     生成评论直达链接。
 
+    - 视频（item_type 含 AV 或 item_id 带 av 前缀）: https://www.bilibili.com/video/av{aid}/#reply{rpid}
     - 动态: https://t.bilibili.com/{dynamic_id}#reply{rpid}
-    - 视频: https://www.bilibili.com/video/av{aid}/#reply{rpid}
-    - 其他: 降级为动态链接
+
+    aid 优先取 comment_oid（真实 aid，item_id 是动态ID时必需）；
+    视频类但 aid 缺失时降级为动态链接。
     """
-    if item_type and "AV" in item_type:
-        return f"https://www.bilibili.com/video/{item_id}/#reply{rpid}"
-    else:
-        return f"https://t.bilibili.com/{item_id}#reply{rpid}"
+    # 视频类判定：item_type 含 AV，或 item_id 自带 av 前缀（批量邮件不传 item_type 时靠此识别）
+    is_video = (item_type and "AV" in item_type) or item_id.startswith("av")
+    if is_video:
+        real_aid = _resolve_aid(item_id, aid)
+        if real_aid:
+            return f"https://www.bilibili.com/video/av{real_aid}/#reply{rpid}"
+    return f"https://t.bilibili.com/{item_id}#reply{rpid}"
 
 
-def build_item_url(item_id: str, item_type: str) -> str:
-    """生成作品链接（不带评论锚点）"""
-    if item_type and "AV" in item_type:
-        return f"https://www.bilibili.com/video/{item_id}"
-    else:
-        return f"https://t.bilibili.com/{item_id}"
+def build_item_url(item_id: str, item_type: str, aid: str = "") -> str:
+    """生成作品链接（不带评论锚点），规则同 build_comment_url"""
+    is_video = (item_type and "AV" in item_type) or item_id.startswith("av")
+    if is_video:
+        real_aid = _resolve_aid(item_id, aid)
+        if real_aid:
+            return f"https://www.bilibili.com/video/av{real_aid}"
+    return f"https://t.bilibili.com/{item_id}"
 
 
 # ============================================================
@@ -391,7 +410,7 @@ def _embed_screenshot(screenshot_path: Optional[str]) -> Optional[str]:
         return None
 
 
-def build_single_email(interaction: dict, up_name: str, item_type: str = "", theme: dict = None, post_content: str = "", post_rich_content: str = "") -> str:
+def build_single_email(interaction: dict, up_name: str, item_type: str = "", theme: dict = None, post_content: str = "", post_rich_content: str = "", oid_map: dict = None) -> str:
     """构建单条互动邮件 HTML，可选传入预设主题（预览用）。场景二原帖自动从 sent_emails/ 读截图。"""
     if theme is None:
         theme = random_theme()
@@ -407,8 +426,10 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
 
     scene_name = "自身作品" if scene == "scene1" else ("话题互动" if scene == "scene2" else "切片视频")
     reply_type = "子评论" if is_sub else "主评论"
-    comment_url = build_comment_url(item_id, item_type, rpid)
-    item_url = build_item_url(item_id, item_type)
+    # comment_oid（真实 aid）映射：视频评论用视频页链接，动态评论用动态页链接
+    aid = (oid_map or {}).get(item_id, "")
+    comment_url = build_comment_url(item_id, item_type, rpid, aid)
+    item_url = build_item_url(item_id, item_type, aid)
 
     # 场景二/三：原帖上下文卡片（截图优先，文本降级）
     # 截图在入库时已生成，路径 = sent_emails/dynamic_{item_id}.png
@@ -508,7 +529,7 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
 </body></html>"""
 
 
-def build_digest_email(interactions: list, up_name: str = "", post_contents: dict = None, post_rich_contents: dict = None, title: str = None, today_count: int = None) -> str:
+def build_digest_email(interactions: list, up_name: str = "", post_contents: dict = None, post_rich_contents: dict = None, title: str = None, today_count: int = None, oid_map: dict = None) -> str:
     """
     构建汇总邮件 HTML（日报 + 场景二批量共用）。
 
@@ -518,11 +539,13 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         post_contents: item_id → post_content 映射（场景二原帖正文，可选）
         post_rich_contents: item_id → post_rich_content 映射（可选）
         title: 自定义标题（不传则用日期+日报默认标题）
+        oid_map: item_id → comment_oid 映射（视频评论链接用真实 aid）
     """
     theme = random_theme()
     today_str = datetime.now().strftime("%Y年%m月%d日")
     pc_map = post_contents or {}
     pr_map = post_rich_contents or {}
+    oid_map = oid_map or {}
     header_title = title or f"{today_str} UP主互动日报"
 
     items_html = ""
@@ -539,7 +562,8 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
 
         scene_name = "自身作品" if scene == "scene1" else ("话题互动" if scene == "scene2" else "切片视频")
         reply_type = "子评论" if is_sub else "主评论"
-        comment_url = build_comment_url(item_id, "", rpid)
+        # comment_oid（真实 aid）映射：视频评论用视频页链接（场景三/视频动态必须，动态ID≠aid）
+        comment_url = build_comment_url(item_id, "", rpid, oid_map.get(item_id, ""))
 
         # 场景二/三：原帖上下文卡片（截图优先，文本降级）
         # 截图在入库时已生成，路径 = sent_emails/dynamic_{item_id}.png
@@ -586,6 +610,8 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
 
         like_badge = '<span class="badge">UP觉得很赞</span>' if up_liked else ""
         scene_badge = f'<span class="badge">{scene_name}</span>'
+        # 主评论/子评论也打徽章（与单封邮件一致）
+        reply_badge = f'<span class="badge">{reply_type}</span>'
 
         # 渲染评论内容（文字+表情+图片）
         content_html = render_comment_html(
@@ -595,7 +621,7 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         items_html += f"""
         <div class="interaction">
             <div class="label" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">
-                <span>#{i+1} {html.escape(discovered_at)} {scene_badge} {like_badge} {reply_type}</span>
+                <span>#{i+1} {html.escape(discovered_at)} {scene_badge} {like_badge} {reply_badge}</span>
                 <a class="btn" href="{html.escape(comment_url)}" target="_blank" style="padding:3px 12px; font-size:11px; margin-right:0">评论直达</a>
             </div>
             {post_context_html}
@@ -603,7 +629,11 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
             <div class="text">{content_html}</div>
         </div>"""
 
-    trace = f"{today_str} · 共{len(interactions)}条 | {theme['primary']}→{theme['secondary']}"
+    # 追踪信息：批量邮件补上 cid（场景三无单封邮件，靠此定位评论）
+    trace = f"{today_str} · 共{len(interactions)}条"
+    if interactions:
+        trace += f" | 首条cid={interactions[0].get('comment_id', '')}"
+    trace += f" | {theme['primary']}→{theme['secondary']}"
     safe_up = html.escape(up_name)
 
     return f"""<!DOCTYPE html>
@@ -714,16 +744,21 @@ class Notifier:
         # 场景二/三：查原帖正文和富内容（截图在入库时已生成，builder 自动读取）
         post_content = ""
         post_rich = ""
+        oid_map = {}
         if interaction.get("scene") in ("scene2", "scene3"):
             item_id = interaction.get("item_id", "")
             post_content = await self.db.get_item_post_content(item_id)
             post_rich = await self.db.get_item_post_rich_content(item_id)
+        # comment_oid 映射：视频评论链接用真实 aid（所有场景都查，动态ID≠aid）
+        item_id = interaction.get("item_id", "")
+        if item_id:
+            oid_map[item_id] = await self.db.get_item_comment_oid(item_id)
 
         if is_priority:
             subject = f"【EchoWatch】UP主「{up_name}」置顶动态有更新"
         else:
             subject = f"【EchoWatch】UP主「{up_name}」有新互动"
-        html = build_single_email(interaction, up_name, item_type, post_content=post_content, post_rich_content=post_rich)
+        html = build_single_email(interaction, up_name, item_type, post_content=post_content, post_rich_content=post_rich, oid_map=oid_map)
 
         result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
         if result:
@@ -840,6 +875,7 @@ class Notifier:
         # 批量查原帖正文和富内容
         post_contents = {}
         post_rich_map = {}
+        oid_map = {}
         for it in interactions:
             item_id = it.get("item_id", "")
             if item_id and item_id not in post_contents:
@@ -849,6 +885,7 @@ class Notifier:
                     post_contents[item_id] = pc
                 if pr:
                     post_rich_map[item_id] = pr
+                oid_map[item_id] = await self.db.get_item_comment_oid(item_id)
 
         now_str = datetime.now().strftime("%H:%M")
         subject = f"【EchoWatch】UP主「{up_name}」话题互动汇总（{len(interactions)}条）"
@@ -861,7 +898,7 @@ class Notifier:
         html = build_digest_email(interactions, up_name, post_contents,
                                   post_rich_contents=post_rich_map,
                                   title=f"话题互动即时汇总 ({now_str})",
-                                  today_count=today_count)
+                                  today_count=today_count, oid_map=oid_map)
 
         result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
         if result:
@@ -885,6 +922,7 @@ class Notifier:
         # 批量查原帖正文和富内容（切片视频标题/封面，邮件上下文用）
         post_contents = {}
         post_rich_map = {}
+        oid_map = {}
         for it in interactions:
             item_id = it.get("item_id", "")
             if item_id and item_id not in post_contents:
@@ -894,6 +932,7 @@ class Notifier:
                     post_contents[item_id] = pc
                 if pr:
                     post_rich_map[item_id] = pr
+                oid_map[item_id] = await self.db.get_item_comment_oid(item_id)
 
         now_str = datetime.now().strftime("%H:%M")
         subject = f"【EchoWatch】UP主「{up_name}」切片视频互动汇总（{len(interactions)}条）"
@@ -906,7 +945,7 @@ class Notifier:
         html = build_digest_email(interactions, up_name, post_contents,
                                   post_rich_contents=post_rich_map,
                                   title=f"切片视频互动即时汇总 ({now_str})",
-                                  today_count=today_count)
+                                  today_count=today_count, oid_map=oid_map)
 
         result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
         if result:
@@ -951,11 +990,19 @@ class Notifier:
         for uid in {it.get("up_uid", "") for it in subs if it.get("up_uid")}:
             today_count += len(await self.db.get_today_interactions(uid))
 
+        # comment_oid 映射：priority 视频动态的评论链接用真实 aid
+        oid_map = {}
+        for it in subs:
+            item_id = it.get("item_id", "")
+            if item_id and item_id not in oid_map:
+                oid_map[item_id] = await self.db.get_item_comment_oid(item_id)
+
         # 复用场景二同款汇总模板
         html = build_digest_email(
             subs, up_name,
             title=f"置顶动态子评论汇总 ({now_str})",
             today_count=today_count,
+            oid_map=oid_map,
         )
 
         result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
@@ -981,16 +1028,18 @@ class Notifier:
         # 场景二/三：批量查原帖正文和富内容（item_id → 内容 映射）
         post_contents = {}
         post_rich_map = {}
+        oid_map = {}
         for it in interactions:
-            if it.get("scene") in ("scene2", "scene3"):
-                item_id = it.get("item_id", "")
-                if item_id and item_id not in post_contents:
-                    pc = await self.db.get_item_post_content(item_id)
-                    pr = await self.db.get_item_post_rich_content(item_id)
-                    if pc:
-                        post_contents[item_id] = pc
-                    if pr:
-                        post_rich_map[item_id] = pr
+            item_id = it.get("item_id", "")
+            if item_id and item_id not in post_contents:
+                pc = await self.db.get_item_post_content(item_id)
+                pr = await self.db.get_item_post_rich_content(item_id)
+                if pc:
+                    post_contents[item_id] = pc
+                if pr:
+                    post_rich_map[item_id] = pr
+                # 所有场景都查 comment_oid（视频评论链接用真实 aid）
+                oid_map[item_id] = await self.db.get_item_comment_oid(item_id)
 
         subject = f"【EchoWatch·日报】{datetime.now().strftime('%m月%d日')} UP主互动汇总（{len(interactions)}条）"
 
@@ -999,7 +1048,7 @@ class Notifier:
 
         html = build_digest_email(interactions, up_name, post_contents,
                                   post_rich_contents=post_rich_map,
-                                  today_count=today_count)
+                                  today_count=today_count, oid_map=oid_map)
 
         result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
         if result:

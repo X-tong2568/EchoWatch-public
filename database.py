@@ -446,6 +446,27 @@ class Database:
         )
         return row[0]["item_type"] or "" if row else ""
 
+    async def get_item_comment_oid(self, item_id: str) -> str:
+        """根据 item_id 查评论区 oid（视频为 aid，动态为动态ID；邮件链接生成用）"""
+        row = await self._conn.execute_fetchall(
+            "SELECT comment_oid FROM monitored_items WHERE item_id = ?",
+            (item_id,)
+        )
+        return row[0]["comment_oid"] or "" if row else ""
+
+    async def get_item_by_comment_oid(self, comment_oid: str) -> Optional[dict]:
+        """
+        按 comment_oid 查已有监测项（跨场景去重用）。
+
+        同一评论区（同一视频 aid / 同一动态）只应被一个场景监测，
+        scene2/scene3 发现前先查此方法，占用则跳过。
+        """
+        row = await self._conn.execute_fetchall(
+            "SELECT * FROM monitored_items WHERE comment_oid = ? LIMIT 1",
+            (comment_oid,)
+        )
+        return dict(row[0]) if row else None
+
     async def archive_stale(self, hours_threshold: int) -> int:
         """归档超时的监测项（Level > 0 设为 Level 0），返回归档数量"""
         cutoff = (datetime.now() - timedelta(hours=hours_threshold)).strftime("%Y-%m-%d %H:%M:%S")

@@ -86,6 +86,15 @@ class Scene2Monitor:
                     if not dyn_id or not comment_oid:
                         continue
 
+                    # 跨场景去重：同一评论区（同一视频aid/动态）已被其他场景占用则跳过
+                    # （如场景三切片已监测该视频，避免双份监测与场景归属混乱）
+                    existing = await self.db.get_item_by_comment_oid(comment_oid)
+                    if existing and existing["item_id"] != dyn_id:
+                        logger.debug(
+                            f"话题帖评论区已被监测 (oid={comment_oid} item={existing['item_id']})，跳过 {dyn_id}"
+                        )
+                        continue
+
                     inserted = await self.db.upsert_item(
                         item_id=dyn_id,
                         comment_oid=comment_oid,

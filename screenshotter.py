@@ -50,8 +50,8 @@ BROWSER_CONFIG = {
 # 截图参数
 VIEWPORT_WIDTH = 700           # 匹配动态卡片宽度（非手机全屏）
 VIEWPORT_HEIGHT = 1200
-# 动态ID白名单：仅纯数字（B站动态/作品ID），防路径穿越写入异常文件
-_DYNAMIC_ID_RE = re.compile(r"^\d+$")
+# 动态ID白名单：纯数字动态ID 或 av+数字（空间动态API风控降级路径产物），防路径穿越写入异常文件
+_DYNAMIC_ID_RE = re.compile(r"^(av)?\d+$")
 DEVICE_SCALE_FACTOR = 2        # 2x Retina 高清
 BROWSER_RESTART_INTERVAL = 50  # 每 50 次截图重启浏览器
 # 动态卡片 CSS 选择器（照搬 BTCE3.0）
@@ -188,21 +188,31 @@ class Screenshotter:
                 "height": VIEWPORT_HEIGHT,
             })
 
-            # 先种游客 cookie，再访问目标动态页（顺序不能反）
+            # 先种游客 cookie，再访问目标页面（顺序不能反）
             await self._seed_cookies(page)
 
-            url = f"https://t.bilibili.com/{dynamic_id}"
+            # 降级路径（空间动态API风控）的 item_id 带 av 前缀，如 av117032272005640：
+            # 没有动态页，只能截视频页（www.bilibili.com/video/av{aid}），走全页降级截图
+            is_av_fallback = dynamic_id.startswith("av")
+            if is_av_fallback:
+                url = f"https://www.bilibili.com/video/{dynamic_id}"
+            else:
+                url = f"https://t.bilibili.com/{dynamic_id}"
             await page.goto(url, wait_until="load", timeout=20000)
 
             # 412 风控拦截检测：命中或页面被重定向（URL 不再含动态 ID）则抛异常，
-            # 走外层重试/降级，绝不把风控页当动态卡片截下来
+            # 走外层重试/降级，绝不把风控页当动态卡片截下来。
+            # 视频页会 302 到 BV 号 URL，不按动态ID校验，只检查仍停留在视频页
             risk_hit = await page.evaluate(
                 """() => {
                     const bodyText = document.body ? document.body.innerText.slice(0, 3000) : '';
                     return /request was banned|访问异常|访问过于频繁/.test(bodyText);
                 }"""
             )
-            if risk_hit or f"/{dynamic_id}" not in page.url:
+            url_ok = f"/{dynamic_id}" in page.url or (
+                is_av_fallback and "/video/" in page.url
+            )
+            if risk_hit or not url_ok:
                 raise RuntimeError(f"页面被B站风控拦截 (url={page.url})")
 
             try:

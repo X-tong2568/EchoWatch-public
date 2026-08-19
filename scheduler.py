@@ -75,10 +75,6 @@ class Scheduler:
             tasks.append(asyncio.create_task(self._scene2_relevel_loop()))
             tasks.append(asyncio.create_task(self._scene2_batch_notify_loop()))
             logger.info("场景二调度已启动 (发现+L1轮询+L2轮询+重新分级+批量通知)")
-            # 截图补截循环：仅截图模式启用时启动
-            if self.screenshotter:
-                tasks.append(asyncio.create_task(self._screenshot_retry_loop()))
-                logger.info(f"截图补截循环已启动: 每 {self.config.screenshot.retry_interval}s 执行")
 
         if self.config.monitor.scene3_enabled and self.config.scene3.clip_up_list:
             tasks.append(asyncio.create_task(self._scene3_discover_loop()))
@@ -93,6 +89,12 @@ class Scheduler:
         tasks.append(asyncio.create_task(self._daily_digest_loop()))
         tasks.append(asyncio.create_task(self._immediate_notify_loop()))
         logger.info("通用调度任务已启动 (归档+日报+场景一即时通知)")
+
+        # 截图补截循环：场景二/三任一启用即启动
+        # （场景三首次入库暂缓截图，靠此循环分批补齐，否则邮件无原帖截图）
+        if (self.config.monitor.scene2_enabled or self.config.monitor.scene3_enabled) and self.screenshotter:
+            tasks.append(asyncio.create_task(self._screenshot_retry_loop()))
+            logger.info(f"截图补截循环已启动: 每 {self.config.screenshot.retry_interval}s 执行")
 
         self._tasks = tasks
         try:
