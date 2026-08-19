@@ -448,9 +448,10 @@ class Scene3Monitor:
             target_found = True
             parent_rpid = parsed["parent_rpid"]
             if parent_rpid == root_rpid:
-                parent_content = root_context["content"]
-                parent_author = root_context["uname"]
-                parent_rich = root_context.get("rich_content", "")
+                # root_context 可能为 None（sweep 兜底扫查场景，无主列表上下文）
+                parent_content = root_context["content"] if root_context else ""
+                parent_author = root_context["uname"] if root_context else ""
+                parent_rich = root_context.get("rich_content", "") if root_context else ""
             elif parent_rpid in sub_lookup:
                 parent_content = sub_lookup[parent_rpid]["content"]
                 parent_author = sub_lookup[parent_rpid]["uname"]

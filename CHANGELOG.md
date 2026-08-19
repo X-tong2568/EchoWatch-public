@@ -58,6 +58,24 @@ EchoWatch（留声）版本更新记录。
 
 ---
 
+### 补充修复（2026-08-19，未打版本 tag）：场景三 sweep 子评论基线扫查 root_context None 防御
+
+**问题**：场景三 `sweep_sub_comment_baselines` 兜底扫查调用 `_process_sub_comments` 时
+`root_context` 传 None（无主列表上下文），但当目标UP主直接回复楼中楼根评论
+（`parent_rpid == root_rpid`）时，代码直接 `root_context["content"]` 取值 → 崩溃
+`'NoneType' object is not subscriptable` → 整轮 sweep 中断，且基线已更新不重翻，
+存在互动永久漏检风险。场景一 v1.6.0 已修过同样问题，场景三 v1.8.0 新增时未带上该防御。
+
+**修复**：与场景一同一方案，`root_context` 为 None 时 parent 字段置空
+（`parent_content = root_context["content"] if root_context else ""`），sweep 路径不再崩溃。
+
+#### Claude (AI Assistant) 的贡献
+
+- **缺陷修复**：场景三 sweep 路径 root_context None 防御（对齐场景一 v1.6.0 方案）
+- **验证**：服务器日志复现确认（sweep 异常栈）、数据库核对无漏检、修复后重启日志确认无新异常
+
+---
+
 ### 补充修复（2026-08-18，未打版本 tag）：邮件 HTML 注入与路径穿越安全加固 + 6 项修复
 
 **问题**：邮件模板中 UP主昵称、父评论作者、发现时间等外部可控字段直接拼入 HTML，
