@@ -311,10 +311,15 @@ class Database:
         await self._conn.commit()
 
     async def get_screenshot_pending_items(self, limit: int = 5) -> list[str]:
-        """获取待补截动态的 item_id 列表（按发现时间从新到旧，最多 limit 条）"""
+        """
+        获取待补截动态的 item_id 列表（按发现时间从新到旧，最多 limit 条）。
+
+        不限 monitor_level：场景三历史切片归档（L0）后仍需补齐截图
+        （首次入库暂缓截图，由补截循环分批补齐，邮件上下文用）。
+        """
         sql = """
         SELECT item_id FROM monitored_items
-        WHERE screenshot_pending = 1 AND monitor_level > 0
+        WHERE screenshot_pending = 1
         ORDER BY first_seen_at DESC LIMIT ?
         """
         rows = await self._conn.execute_fetchall(sql, (limit,))

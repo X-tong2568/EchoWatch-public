@@ -13,6 +13,7 @@ from email_notifier import Notifier
 from logger_config import logger, setup_logging
 from monitor_scene1 import Scene1Monitor
 from monitor_scene2 import Scene2Monitor
+from monitor_scene3 import Scene3Monitor
 from scheduler import Scheduler
 from screenshotter import Screenshotter
 
@@ -47,7 +48,7 @@ async def main():
     client = BiliClient()
 
     # ----------------------------------------------------------
-    # 5. 验证 UP主 信息
+    # 5. 验证 UP主 信息（场景三：自动获取切片员昵称，config 只需填 UID）
     # ----------------------------------------------------------
     for up in config.up_list:
         try:
@@ -56,11 +57,20 @@ async def main():
         except Exception as e:
             logger.warning(f"获取 UP主 信息失败 (UID={up.uid}): {e}")
 
+    # 场景三：切片员昵称自动获取（失败则保留 config 中的占位名，不阻塞启动）
+    for clip_up in config.scene3.clip_up_list:
+        try:
+            info = await client.get_user_info(clip_up.uid)
+            clip_up.name = info.get("name", clip_up.name)
+            logger.info(f"切片员: {clip_up.name} (UID: {clip_up.uid})")
+        except Exception as e:
+            logger.warning(f"获取切片员信息失败 (UID={clip_up.uid}): {e}")
+
     # ----------------------------------------------------------
-    # 6. 初始化截图器（场景二原帖截图，在 Scene2Monitor 之前创建）
+    # 6. 初始化截图器（场景二/三原帖截图，在 Scene2Monitor 之前创建）
     # ----------------------------------------------------------
     screenshotter = None
-    if config.monitor.scene2_enabled and config.screenshot.enabled:
+    if (config.monitor.scene2_enabled or config.monitor.scene3_enabled) and config.screenshot.enabled:
         try:
             screenshotter = Screenshotter(config.screenshot.save_dir)
             await screenshotter.start()
@@ -75,8 +85,9 @@ async def main():
     notifier = Notifier(config, db)
     scene1 = Scene1Monitor(db, client, config, notifier)
     scene2 = Scene2Monitor(db, client, config, screenshotter)
+    scene3 = Scene3Monitor(db, client, config, screenshotter)
 
-    scheduler = Scheduler(config, db, client, scene1, scene2, notifier, screenshotter)
+    scheduler = Scheduler(config, db, client, scene1, scene2, scene3, notifier, screenshotter)
 
     # ----------------------------------------------------------
     # 8. 打印配置摘要
@@ -90,6 +101,11 @@ async def main():
         logger.info(f"      优先动态: {len(up.priority_dynamics)} 个")
     logger.info(f"  场景一: {'启用' if config.monitor.scene1_enabled else '禁用'}")
     logger.info(f"  场景二: {'启用' if config.monitor.scene2_enabled else '禁用'}")
+    logger.info(f"  场景三: {'启用' if config.monitor.scene3_enabled else '禁用'}")
+    if config.monitor.scene3_enabled:
+        logger.info(f"    目标UP主UID: {config.scene3.target_uid}")
+        for clip_up in config.scene3.clip_up_list:
+            logger.info(f"    切片员: {clip_up.name} (UID: {clip_up.uid})")
     logger.info(f"  Level1 间隔: {config.intervals.level1_poll_seconds}s")
     logger.info(f"  Level2 间隔: {config.intervals.level2_poll_seconds}s")
     logger.info(f"  日报时间: {config.notify.daily_digest_hour}:00")

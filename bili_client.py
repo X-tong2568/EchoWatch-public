@@ -655,13 +655,27 @@ class BiliClient:
         注意：B站 要求 pagination_str 传 {"offset": <裸值>} 的 JSON 格式，
         直接传裸字符串会 -400（2026-08-11 实测复现，参考 Freeview 插件实现）。
         函数内部负责 JSON 包装，调用方只需传裸值。
+
+        干净会话说明（2026-08-19 实测）：主会话种过 buvid 后（space feed/topic feed
+        调用过），本接口可见评论条数会被 B站 降级（9条 → 3条，关键楼消失）。
+        与子评论翻页同一机理，必须走独立干净会话 _get_sub_session。
         """
         params = {"oid": oid, "type": comment_type, "mode": mode}
         if pagination_str and pagination_str != "0":
             params["pagination_str"] = json.dumps({"offset": pagination_str})
 
         try:
-            data = await self._signed_get(MAIN_COMMENT_URL, params)
+            # 走干净会话 + 手动WBI签名（主会话的 buvid 会触发评论降级）
+            mixin = await self._fetch_mixin_key()
+            signed = wbi_sign_params(params, mixin)
+            session = await self._get_sub_session()
+            async with session.get(MAIN_COMMENT_URL, params=signed) as resp:
+                raw_data = await resp.json()
+            if raw_data.get("code") != 0:
+                raise RuntimeError(
+                    f"API错误 url={MAIN_COMMENT_URL} code={raw_data.get('code')} msg={raw_data.get('message')}"
+                )
+            data = raw_data.get("data", {})
         except RuntimeError as e:
             # 确定性错误码：重试无意义，快速失败返回空
             if any(f"code={code}" in str(e) for code in (-400, -404, 12002)):

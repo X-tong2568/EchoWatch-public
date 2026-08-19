@@ -262,19 +262,9 @@ def render_comment_html(content_text: str, rich_content_str: str = None) -> str:
                 + "</div>"
             )
 
-    # 5. 超链接（jump_url）
-    jump_urls = rich.get("jump_url", {})
-    if jump_urls:
-        for key_text, jump_info in jump_urls.items():
-            pc_url = _safe_url(jump_info.get("pc_url", ""))
-            title = jump_info.get("title", key_text)
-            escaped_key = html.escape(key_text)
-            if pc_url and escaped_key in msg:
-                link_tag = (
-                    f'<a href="{html.escape(pc_url)}" class="jump-link"'
-                    f' target="_blank">{html.escape(title)}</a>'
-                )
-                msg = msg.replace(escaped_key, link_tag)
+    # 5. 超链接（jump_url）：不渲染（2026-08-19 XTong 要求清洗）
+    # B站 会为评论中的关键词自动生成"评论内容自动搜索"链接（如"你真好"→ 搜索页），
+    # 对邮件读者是噪音且像广告，全部跳过。用户手动发的链接在 message 中仍以纯文本显示。
 
     return msg + pictures_html
 
@@ -415,15 +405,15 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
     parent_author = interaction.get("parent_author", "")
     discovered_at = interaction.get("discovered_at", "")
 
-    scene_name = "自身作品" if scene == "scene1" else "话题互动"
+    scene_name = "自身作品" if scene == "scene1" else ("话题互动" if scene == "scene2" else "切片视频")
     reply_type = "子评论" if is_sub else "主评论"
     comment_url = build_comment_url(item_id, item_type, rpid)
     item_url = build_item_url(item_id, item_type)
 
-    # 场景二：原帖上下文卡片（截图优先，文本降级）
+    # 场景二/三：原帖上下文卡片（截图优先，文本降级）
     # 截图在入库时已生成，路径 = sent_emails/dynamic_{item_id}.png
     post_context_html = ""
-    if scene == "scene2":
+    if scene in ("scene2", "scene3"):
         expected_shot = str(SENT_DIR / f"dynamic_{item_id}.png")
         screenshot_html = _embed_screenshot(expected_shot)
         if screenshot_html:
@@ -547,14 +537,14 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         parent_author = interaction.get("parent_author", "")
         discovered_at = interaction.get("discovered_at", "")
 
-        scene_name = "自身作品" if scene == "scene1" else "话题互动"
+        scene_name = "自身作品" if scene == "scene1" else ("话题互动" if scene == "scene2" else "切片视频")
         reply_type = "子评论" if is_sub else "主评论"
         comment_url = build_comment_url(item_id, "", rpid)
 
-        # 场景二：原帖上下文卡片（截图优先，文本降级）
+        # 场景二/三：原帖上下文卡片（截图优先，文本降级）
         # 截图在入库时已生成，路径 = sent_emails/dynamic_{item_id}.png
         post_context_html = ""
-        if scene == "scene2":
+        if scene in ("scene2", "scene3"):
             expected_shot = str(SENT_DIR / f"dynamic_{item_id}.png")
             screenshot_html = _embed_screenshot(expected_shot)
             if screenshot_html:
@@ -721,10 +711,10 @@ class Notifier:
         if not self.config.notify.immediate:
             return
 
-        # 场景二：查原帖正文和富内容（截图在入库时已生成，builder 自动读取）
+        # 场景二/三：查原帖正文和富内容（截图在入库时已生成，builder 自动读取）
         post_content = ""
         post_rich = ""
-        if interaction.get("scene") == "scene2":
+        if interaction.get("scene") in ("scene2", "scene3"):
             item_id = interaction.get("item_id", "")
             post_content = await self.db.get_item_post_content(item_id)
             post_rich = await self.db.get_item_post_rich_content(item_id)
@@ -883,6 +873,51 @@ class Notifier:
         else:
             logger.error("场景二批量邮件发送失败")
 
+    async def send_scene3_batch(self, up_name: str = ""):
+        """场景三批量发送：将所有待通知的场景三互动（切片视频下目标UP主回复）合并为一封邮件"""
+        if not self.config.notify.immediate:
+            return
+
+        interactions = await self.db.get_unnotified_immediate(scene="scene3")
+        if not interactions:
+            return
+
+        # 批量查原帖正文和富内容（切片视频标题/封面，邮件上下文用）
+        post_contents = {}
+        post_rich_map = {}
+        for it in interactions:
+            item_id = it.get("item_id", "")
+            if item_id and item_id not in post_contents:
+                pc = await self.db.get_item_post_content(item_id)
+                pr = await self.db.get_item_post_rich_content(item_id)
+                if pc:
+                    post_contents[item_id] = pc
+                if pr:
+                    post_rich_map[item_id] = pr
+
+        now_str = datetime.now().strftime("%H:%M")
+        subject = f"【EchoWatch】UP主「{up_name}」切片视频互动汇总（{len(interactions)}条）"
+
+        # 今日累计：按本批涉及的 UP 分别查库求和（今日的应该累加，本轮条数只是本次发送量）
+        today_count = 0
+        for uid in {it.get("up_uid", "") for it in interactions if it.get("up_uid")}:
+            today_count += len(await self.db.get_today_interactions(uid))
+
+        html = build_digest_email(interactions, up_name, post_contents,
+                                  post_rich_contents=post_rich_map,
+                                  title=f"切片视频互动即时汇总 ({now_str})",
+                                  today_count=today_count)
+
+        result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
+        if result:
+            ids = [i["id"] for i in interactions]
+            await self.db.mark_notified_immediate(ids)
+            logger.info(f"场景三批量邮件已发送: {len(interactions)} 条互动")
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            _archive_email(f"{ts}_scene3_batch_{len(interactions)}条.html", html)
+        else:
+            logger.error("场景三批量邮件发送失败")
+
     async def send_priority_sub_batch(self, up_name: str = "", up_uid: str = None):
         """
         priority 子评论批量发送：合并为一封邮件（复用场景二的汇总模板）。
@@ -943,11 +978,11 @@ class Notifier:
             logger.info("日报：今日无新互动，跳过")
             return
 
-        # 场景二：批量查原帖正文和富内容（item_id → 内容 映射）
+        # 场景二/三：批量查原帖正文和富内容（item_id → 内容 映射）
         post_contents = {}
         post_rich_map = {}
         for it in interactions:
-            if it.get("scene") == "scene2":
+            if it.get("scene") in ("scene2", "scene3"):
                 item_id = it.get("item_id", "")
                 if item_id and item_id not in post_contents:
                     pc = await self.db.get_item_post_content(item_id)
@@ -1063,7 +1098,7 @@ async def _test():
         "id": 1001,
         "up_uid": "000000000",
         "item_id": "999888777000111222",
-        "comment_id": "111222333556",
+        "comment_id": "309143024561",
         "is_sub_reply": False,
         "parent_content": "",
         "parent_author": "",
