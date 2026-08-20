@@ -488,6 +488,10 @@ class Scene1Monitor:
             if resp and resp.get("disabled"):
                 # 评论区已关闭（确定性错误）：不打基线，避免反复空翻
                 return False
+            if resp and resp.get("banned"):
+                # -412 风控：本轮跳过，不打基线，下轮重试（防误报）
+                logger.warning(f"子评论风控跳过 root={root_rpid} page={page}")
+                break
 
             subs = resp.get("replies") or [] if resp else []
             all_subs.extend(subs)

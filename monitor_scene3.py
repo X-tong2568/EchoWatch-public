@@ -18,6 +18,8 @@ SUB_COMMENT_MIN_INTERVAL = 120
 # 子评论全量扫描安全上限（页，×10条/页=最多1000条）。
 # 仅用于「首次检查」和「sweep强制全量扫查」；日常窗口翻页按新增量计算，不受此限。
 MAX_SUB_PAGES = 100
+# 子评论基线扫查逐行请求间隔（秒）：批量 count 查询限速，防密集请求触发 B站 -412 风控
+SUB_SWEEP_REQUEST_INTERVAL = 0.8
 
 
 class Scene3Monitor:
@@ -414,6 +416,10 @@ class Scene3Monitor:
             if resp and resp.get("disabled"):
                 # 评论区已关闭（确定性错误）：不打基线，避免反复空翻
                 return False
+            if resp and resp.get("banned"):
+                # -412 风控：本轮跳过，不打基线，下轮重试（防误报）
+                logger.warning(f"场景三子评论风控跳过 root={root_rpid} page={page}")
+                break
 
             subs = resp.get("replies") or [] if resp else []
             all_subs.extend(subs)
@@ -529,7 +535,11 @@ class Scene3Monitor:
                 resp = await self.client.get_sub_comments(oid, comment_type, root_rpid, 1)
             except Exception as e:
                 logger.debug(f"场景三子评论基线扫查失败 item={row['item_id']} root={root_rpid}: {e}")
+                # 失败也占请求配额，同样限速（防密集请求触发风控）
+                await asyncio.sleep(SUB_SWEEP_REQUEST_INTERVAL)
                 continue
+            # 限速：每基线1次 count 请求后等待，降低批量扫查的请求密度
+            await asyncio.sleep(SUB_SWEEP_REQUEST_INTERVAL)
             count = (resp.get("page") or {}).get("count", 0)
             if not count:
                 continue

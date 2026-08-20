@@ -734,6 +734,11 @@ class BiliClient:
             if any(f"code={code}" in str(e) for code in (-400, -404, 12002)):
                 logger.warning(f"get_sub_comments 确定性失败(不重试) root={root_rpid}: {e}")
                 return {"replies": [], "page": {"count": 0}, "disabled": True}
+            # -412 风控：重试窗口期内大概率持续失败，50s×3 纯刷错误日志。
+            # 快速失败返回 banned 标志，调用方跳过本轮，下轮扫查再试
+            if "code=-412" in str(e):
+                logger.warning(f"get_sub_comments 风控跳过(不重试) root={root_rpid}: {e}")
+                return {"replies": [], "page": {"count": 0}, "banned": True}
             raise
         # 注意：响应结构是 {"code":0, "data":{replies/page}}，取内层 data
         data = raw.get("data") or {}
