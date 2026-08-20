@@ -702,7 +702,7 @@ class BiliClient:
         必须走独立干净会话（_get_sub_session）：主会话种过buvid后，
         本接口第2页起静默返回空，翻页失效（详见_get_sub_session注释）。
 
-        确定性错误处理：12002（评论功能已关闭）、-400/-404 重试无意义，
+        确定性错误处理：12002（评论功能已关闭）、12022（评论已被删除）、-400/-404 重试无意义，
         直接返回空结果（disabled=True），避免 50s×3 重试阻塞 sweep 循环。
 
         Args:
@@ -731,7 +731,7 @@ class BiliClient:
                 )
         except RuntimeError as e:
             # 确定性错误码：重试无意义，快速失败返回空
-            if any(f"code={code}" in str(e) for code in (-400, -404, 12002)):
+            if any(f"code={code}" in str(e) for code in (-400, -404, 12002, 12022)):
                 logger.warning(f"get_sub_comments 确定性失败(不重试) root={root_rpid}: {e}")
                 return {"replies": [], "page": {"count": 0}, "disabled": True}
             # -412 风控：重试窗口期内大概率持续失败，50s×3 纯刷错误日志。
