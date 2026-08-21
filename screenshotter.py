@@ -198,15 +198,26 @@ class Screenshotter:
                 url = f"https://www.bilibili.com/video/{dynamic_id}"
             else:
                 url = f"https://t.bilibili.com/{dynamic_id}"
-            await page.goto(url, wait_until="load", timeout=20000)
+            resp = await page.goto(url, wait_until="load", timeout=20000)
+            # HTTP 状态检查：风控拦截页（412/403/429）和代理错误页（502/503）几乎
+            # 必然以非 200 状态返回，比文字匹配更可靠，命中直接判失败走重试/降级
+            if resp is not None and resp.status >= 400:
+                raise RuntimeError(f"页面HTTP状态异常({resp.status}): {url}")
 
-            # 412 风控拦截检测：命中或页面被重定向（URL 不再含动态 ID）则抛异常，
+            try:
+                await page.wait_for_load_state("networkidle", timeout=8000)
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+
+            # 412 风控拦截检测：放在 networkidle 之后（页面已稳定），避免拦截页
+            # JS 后渲染时漏检。命中或页面被重定向（URL 不再含动态 ID）则抛异常，
             # 走外层重试/降级，绝不把风控页当动态卡片截下来。
             # 视频页会 302 到 BV 号 URL，不按动态ID校验，只检查仍停留在视频页
             risk_hit = await page.evaluate(
                 """() => {
                     const bodyText = document.body ? document.body.innerText.slice(0, 3000) : '';
-                    return /request was banned|访问异常|访问过于频繁/.test(bodyText);
+                    return /request was banned|访问异常|访问过于频繁|访问被拦截|请求被拦截|访问受限|Access Denied|Forbidden/i.test(bodyText);
                 }"""
             )
             url_ok = f"/{dynamic_id}" in page.url or (
@@ -214,12 +225,6 @@ class Screenshotter:
             )
             if risk_hit or not url_ok:
                 raise RuntimeError(f"页面被B站风控拦截 (url={page.url})")
-
-            try:
-                await page.wait_for_load_state("networkidle", timeout=8000)
-            except Exception:
-                pass
-            await asyncio.sleep(1)
     
             # 隐藏 B站顶栏和固定元素（照搬 BTCE JS 注入）
             await page.evaluate("""
@@ -249,11 +254,23 @@ class Screenshotter:
             card = page.locator(CARD_SELECTOR).first
             path = str(self.save_dir / f"dynamic_{dynamic_id}.png")
             if await card.count() > 0:
+                # 内容校验：卡片无文本且无图片说明页面空白/未渲染（白屏、登录遮罩、
+                # 骨架屏），截出来是废图，抛异常走外层重试/降级
+                card_text = await card.inner_text()
+                card_imgs = await card.locator("img").count()
+                if not card_text.strip() and card_imgs == 0:
+                    raise RuntimeError(f"卡片内容为空(空白/未渲染): {dynamic_id}")
                 await card.scroll_into_view_if_needed()
                 await asyncio.sleep(0.3)
                 await card.screenshot(path=path)
             else:
-                # 降级：找不到卡片元素时全页截图（兼容B站DOM变更）
+                # 降级：找不到卡片元素时全页截图（兼容B站DOM变更），但先校验页面非空白
+                body_text = await page.evaluate(
+                    "() => document.body ? document.body.innerText.trim() : ''"
+                )
+                body_imgs = await page.locator("img").count()
+                if not body_text and body_imgs == 0:
+                    raise RuntimeError(f"页面内容为空(空白/未渲染): {dynamic_id}")
                 logger.warning(f"未找到动态卡片元素，降级为全页截图 ({dynamic_id})")
                 await page.screenshot(path=path, full_page=True)
             logger.info(f"动态截图: {path}")
