@@ -108,6 +108,7 @@ class ScreenshotConfig:
     max_per_batch: int = 5         # 单批最多截几张（防止大量场景二时耗时过长）
     save_dir: str = "sent_emails"  # 截图保存目录
     retry_interval: int = 600      # 截图失败补截循环间隔（秒），失败动态自动重试补截
+    archive_keep_days: int = 30    # 留档截图保留天数，超过自动清理（邮件HTML已内嵌base64，PNG为冗余）
 
 
 @dataclass

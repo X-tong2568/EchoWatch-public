@@ -88,7 +88,8 @@ class Scheduler:
         tasks.append(asyncio.create_task(self._level_transition_loop()))
         tasks.append(asyncio.create_task(self._daily_digest_loop()))
         tasks.append(asyncio.create_task(self._immediate_notify_loop()))
-        logger.info("通用调度任务已启动 (归档+日报+场景一即时通知)")
+        tasks.append(asyncio.create_task(self._archive_cleanup_loop()))
+        logger.info("通用调度任务已启动 (归档+日报+场景一即时通知+留档清理)")
 
         # 截图补截循环：场景二/三任一启用即启动
         # （场景三首次入库暂缓截图，靠此循环分批补齐，否则邮件无原帖截图）
@@ -486,6 +487,37 @@ class Scheduler:
                 await self.scene2.retry_screenshots()
             except Exception as e:
                 logger.error(f"截图补截循环异常: {e}")
+            await asyncio.sleep(interval)
+
+    async def _archive_cleanup_loop(self):
+        """
+        留档清理循环：每日清理超过 archive_keep_days 天的留档截图 PNG。
+
+        邮件HTML发送时已内嵌 base64 图片，PNG 仅发送前读取用，
+        过期删除不影响已留档邮件，磁盘占用进入稳态封顶。
+        """
+        keep_days = self.config.screenshot.archive_keep_days
+        interval = 24 * 3600  # 每日执行一次
+        logger.info(f"留档清理循环: 每日执行, 保留 {keep_days} 天")
+        while self.running:
+            try:
+                save_dir = Path(self.config.screenshot.save_dir)
+                if not save_dir.exists():
+                    await asyncio.sleep(interval)
+                    continue
+                cutoff = datetime.now().timestamp() - keep_days * 86400
+                removed = 0
+                for f in save_dir.glob("*.png"):
+                    try:
+                        if f.stat().st_mtime < cutoff:
+                            f.unlink()
+                            removed += 1
+                    except OSError as e:
+                        logger.warning(f"留档清理失败 {f.name}: {e}")
+                if removed:
+                    logger.info(f"留档清理: 删除 {removed} 个过期截图")
+            except Exception as e:
+                logger.error(f"留档清理异常: {e}")
             await asyncio.sleep(interval)
 
     async def _retry_screenshot_before_send(self, interactions: list):
