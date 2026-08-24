@@ -431,10 +431,11 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
     comment_url = build_comment_url(item_id, item_type, rpid, aid)
     item_url = build_item_url(item_id, item_type, aid)
 
-    # 场景二/三：原帖上下文卡片（截图优先，文本降级）
-    # 截图在入库时已生成，路径 = sent_emails/dynamic_{item_id}.png
+    # 原帖上下文卡片（截图优先，文本降级）
+    # 截图路径 = sent_emails/dynamic_{item_id}.png（场景二/三入库时生成，场景一入库/补截循环生成；
+    # priority 项不截图，文件不存在则无卡片，天然不附）
     post_context_html = ""
-    if scene in ("scene2", "scene3"):
+    if scene in ("scene1", "scene2", "scene3"):
         expected_shot = str(SENT_DIR / f"dynamic_{item_id}.png")
         screenshot_html = _embed_screenshot(expected_shot)
         if screenshot_html:
@@ -566,10 +567,10 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         # comment_oid（真实 aid）映射：视频评论用视频页链接（场景三/视频动态必须，动态ID≠aid）
         comment_url = build_comment_url(item_id, "", rpid, oid_map.get(item_id, ""))
 
-        # 场景二/三：原帖上下文卡片（截图优先，文本降级）
-        # 截图在入库时已生成，路径 = sent_emails/dynamic_{item_id}.png
+        # 原帖上下文卡片（截图优先，文本降级）
+        # 截图路径 = sent_emails/dynamic_{item_id}.png（场景二/三入库时生成，场景一入库/补截循环生成）
         post_context_html = ""
-        if scene in ("scene2", "scene3"):
+        if scene in ("scene1", "scene2", "scene3"):
             expected_shot = str(SENT_DIR / f"dynamic_{item_id}.png")
             screenshot_html = _embed_screenshot(expected_shot)
             if screenshot_html:
@@ -743,11 +744,11 @@ class Notifier:
         if not self.config.notify.immediate:
             return
 
-        # 场景二/三：查原帖正文和富内容（截图在入库时已生成，builder 自动读取）
+        # 全部场景：查原帖正文和富内容（截图由 builder 自动读取，文本作降级）
         post_content = ""
         post_rich = ""
         oid_map = {}
-        if interaction.get("scene") in ("scene2", "scene3"):
+        if interaction.get("scene") in ("scene1", "scene2", "scene3"):
             item_id = interaction.get("item_id", "")
             post_content = await self.db.get_item_post_content(item_id)
             post_rich = await self.db.get_item_post_rich_content(item_id)

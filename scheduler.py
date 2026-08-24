@@ -93,7 +93,8 @@ class Scheduler:
 
         # 截图补截循环：场景二/三任一启用即启动
         # （场景三首次入库暂缓截图，靠此循环分批补齐，否则邮件无原帖截图）
-        if (self.config.monitor.scene2_enabled or self.config.monitor.scene3_enabled) and self.screenshotter:
+        if (self.config.monitor.scene1_enabled or self.config.monitor.scene2_enabled
+                or self.config.monitor.scene3_enabled) and self.screenshotter:
             tasks.append(asyncio.create_task(self._screenshot_retry_loop()))
             logger.info(f"截图补截循环已启动: 每 {self.config.screenshot.retry_interval}s 执行")
 
@@ -338,6 +339,7 @@ class Scheduler:
     async def _immediate_notify_loop(self):
         """即时通知循环（仅场景一）：发现新互动逐条立即发送。
         priority 项的互动由 _poll_item 内联发送（更快），此处排除避免重复。
+        非 priority 发送前兜底补截原帖截图（与场景二/三批量发送前兜底一致）。
         """
         interval = 30  # 每30秒扫一次
         logger.info(f"即时通知循环（场景一）: 每 {interval}s 检查")
@@ -346,6 +348,14 @@ class Scheduler:
                 # 获取 priority 项的 item_id 集合，用于排除（它们由 poll_priority_only 内联发送）
                 priority_ids = await self.db.get_priority_item_ids()
                 interactions = await self.db.get_unnotified_immediate(scene="scene1")
+                # 发送前兜底：非 priority 互动的原帖若无截图文件则现场补截一次
+                # （priority 属日常分享，通知不附原帖截图，跳过；文件已存在则零成本）
+                non_priority = [
+                    it for it in interactions
+                    if it.get("item_id", "") not in priority_ids
+                ]
+                if self.screenshotter and non_priority:
+                    await self._retry_screenshot_before_send(non_priority)
                 for interaction in interactions:
                     # 跳过 priority 项的互动，避免与 _poll_item 内联发送竞争→重复邮件
                     if interaction.get("item_id", "") in priority_ids:

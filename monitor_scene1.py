@@ -39,11 +39,13 @@ class Scene1Monitor:
     - 用于监测置顶动态等关键作品
     """
 
-    def __init__(self, db: Database, client: BiliClient, config: Config, notifier: Notifier = None):
+    def __init__(self, db: Database, client: BiliClient, config: Config,
+                 notifier: Notifier = None, screenshotter=None):
         self.db = db
         self.client = client
         self.config = config
         self.notifier = notifier
+        self.screenshotter = screenshotter  # 可选，入库时截图用（非 priority 项）
         self._polling_l1 = False
         self._polling_l2 = False
         self._polling_priority = False
@@ -95,6 +97,9 @@ class Scene1Monitor:
             return
 
         new_count = 0
+        # 混合截图策略：本轮已现场截图的张数，超过单批上限后暂缓，交补截循环分批补
+        shot_taken = 0
+        max_shot = self.config.screenshot.max_per_batch
         for dyn in dynamics:
             dyn_id = dyn.get("dynamic_id", "")
             comment_oid = dyn.get("comment_oid", "")
@@ -114,9 +119,29 @@ class Scene1Monitor:
                 up_uid=up.uid,
                 is_priority=is_priority,
                 pub_ts=pub_ts,
+                post_content=dyn.get("content", ""),  # 原帖正文（邮件文本降级用）
             )
             if inserted:
                 new_count += 1
+                # 入库时截图（非 priority 项）：
+                # 小批量立即截，截图失败标记待补截；本轮超过 max_per_batch 张后暂缓，
+                # 由补截循环分批补齐（首次大量入库不阻塞发现流程）。
+                # priority（日常分享）不附原帖截图，不截也不标记。
+                if self.screenshotter and not is_priority:
+                    if shot_taken < max_shot:
+                        # 无论成败都计入本轮截图额度（防慢：失败留待补截循环，不拖慢发现）
+                        shot_taken += 1
+                        try:
+                            shot_path = await self.screenshotter.take_dynamic_screenshot(dyn_id)
+                            if shot_path is None:
+                                await self.db.mark_screenshot_pending(dyn_id)
+                                logger.warning(f"入库截图未成功，已标记待补截 ({dyn_id})")
+                        except Exception as e:
+                            await self.db.mark_screenshot_pending(dyn_id)
+                            logger.warning(f"入库截图失败，已标记待补截 ({dyn_id}): {e}")
+                    else:
+                        await self.db.mark_screenshot_pending(dyn_id)
+                        logger.debug(f"本轮截图已达上限 ({max_shot})，暂缓待补截: {dyn_id}")
             else:
                 # 已存在但oid可能不对，尝试修正（动态ID → 真实aid）
                 await self.db.update_comment_oid(dyn_id, comment_oid)
@@ -190,6 +215,7 @@ class Scene1Monitor:
                 mod_author = modules.get("module_author") or {}
                 pub_ts = mod_author.get("pub_ts", 0)
 
+                # priority（日常分享/置顶）通知不附原帖截图：不入截图流程、不标待补截
                 inserted = await self.db.upsert_item(
                     item_id=dyn_id,
                     comment_oid=comment_oid,

@@ -67,10 +67,11 @@ async def main():
             logger.warning(f"获取切片员信息失败 (UID={clip_up.uid}): {e}")
 
     # ----------------------------------------------------------
-    # 6. 初始化截图器（场景二/三原帖截图，在 Scene2Monitor 之前创建）
+    # 6. 初始化截图器（场景一/二/三原帖截图，在各场景监控器之前创建）
     # ----------------------------------------------------------
     screenshotter = None
-    if (config.monitor.scene2_enabled or config.monitor.scene3_enabled) and config.screenshot.enabled:
+    if (config.monitor.scene1_enabled or config.monitor.scene2_enabled
+            or config.monitor.scene3_enabled) and config.screenshot.enabled:
         try:
             screenshotter = Screenshotter(config.screenshot.save_dir)
             await screenshotter.start()
@@ -83,7 +84,7 @@ async def main():
     # 7. 初始化各模块
     # ----------------------------------------------------------
     notifier = Notifier(config, db)
-    scene1 = Scene1Monitor(db, client, config, notifier)
+    scene1 = Scene1Monitor(db, client, config, notifier, screenshotter)
     scene2 = Scene2Monitor(db, client, config, screenshotter)
     scene3 = Scene3Monitor(db, client, config, screenshotter)
 

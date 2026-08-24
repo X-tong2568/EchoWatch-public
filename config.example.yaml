@@ -65,7 +65,7 @@ notify:
   daily_digest_hour: 22            # 汇总发送时间（24小时制，22=晚上10点）
   prediction_idle_minutes: 120     # 预测窗口无互动自动清空间隔（分钟）
 
-# --- 截图配置（场景二原帖截图）---
+# --- 截图配置（场景原帖截图，场景一/二/三共用）---
 screenshot:
   enabled: true                    # 是否启用截图模式
   max_per_batch: 5                 # 单批最多截几张（防慢）
