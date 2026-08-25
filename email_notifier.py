@@ -410,8 +410,11 @@ def _embed_screenshot(screenshot_path: Optional[str]) -> Optional[str]:
         return None
 
 
-def build_single_email(interaction: dict, up_name: str, item_type: str = "", theme: dict = None, post_content: str = "", post_rich_content: str = "", oid_map: dict = None) -> str:
-    """构建单条互动邮件 HTML，可选传入预设主题（预览用）。场景二原帖自动从 sent_emails/ 读截图。"""
+def build_single_email(interaction: dict, up_name: str, item_type: str = "", theme: dict = None, post_content: str = "", post_rich_content: str = "", oid_map: dict = None, include_post_context: bool = True) -> str:
+    """构建单条互动邮件 HTML，可选传入预设主题（预览用）。场景二原帖自动从 sent_emails/ 读截图。
+
+    include_post_context: 是否渲染原帖上下文卡片；priority 通知传 False，不附原帖内容。
+    """
     if theme is None:
         theme = random_theme()
     item_id = interaction.get("item_id", "")
@@ -432,10 +435,11 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
     item_url = build_item_url(item_id, item_type, aid)
 
     # 原帖上下文卡片（截图优先，文本降级）
-    # 截图路径 = sent_emails/dynamic_{item_id}.png（场景二/三入库时生成，场景一入库/补截循环生成；
-    # priority 项不截图，文件不存在则无卡片，天然不附）
+    # 仅非 priority 通知附加：priority 不附原帖内容，调用方传 include_post_context=False 整体跳过。
+    # 不用"文件恰好不存在"做排除：priority 动态可能先作为普通项入库（留有历史截图），
+    # 或库里存有正文，这两种情况都会让原帖卡片意外出现，故用开关做确定性排除。
     post_context_html = ""
-    if scene in ("scene1", "scene2", "scene3"):
+    if include_post_context and scene in ("scene1", "scene2", "scene3"):
         expected_shot = str(SENT_DIR / f"dynamic_{item_id}.png")
         screenshot_html = _embed_screenshot(expected_shot)
         if screenshot_html:
@@ -531,7 +535,7 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
 </body></html>"""
 
 
-def build_digest_email(interactions: list, up_name: str = "", post_contents: dict = None, post_rich_contents: dict = None, title: str = None, today_count: int = None, oid_map: dict = None) -> str:
+def build_digest_email(interactions: list, up_name: str = "", post_contents: dict = None, post_rich_contents: dict = None, title: str = None, today_count: int = None, oid_map: dict = None, suppress_post_context_ids: set = None) -> str:
     """
     构建汇总邮件 HTML（日报 + 场景二批量共用）。
 
@@ -542,6 +546,7 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         post_rich_contents: item_id → post_rich_content 映射（可选）
         title: 自定义标题（不传则用日期+日报默认标题）
         oid_map: item_id → comment_oid 映射（视频评论链接用真实 aid）
+        suppress_post_context_ids: 不附加原帖内容的 item_id 集合（priority 子评论汇总/日报用）
     """
     theme = random_theme()
     today_str = datetime.now().strftime("%Y年%m月%d日")
@@ -569,8 +574,9 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
 
         # 原帖上下文卡片（截图优先，文本降级）
         # 截图路径 = sent_emails/dynamic_{item_id}.png（场景二/三入库时生成，场景一入库/补截循环生成）
+        # suppress_post_context_ids 内的项（priority）不附原帖内容，确定性排除
         post_context_html = ""
-        if scene in ("scene1", "scene2", "scene3"):
+        if scene in ("scene1", "scene2", "scene3") and item_id not in (suppress_post_context_ids or ()):
             expected_shot = str(SENT_DIR / f"dynamic_{item_id}.png")
             screenshot_html = _embed_screenshot(expected_shot)
             if screenshot_html:
@@ -745,10 +751,11 @@ class Notifier:
             return
 
         # 全部场景：查原帖正文和富内容（截图由 builder 自动读取，文本作降级）
+        # priority 不附原帖内容：跳过查询，模板层也整体跳过渲染
         post_content = ""
         post_rich = ""
         oid_map = {}
-        if interaction.get("scene") in ("scene1", "scene2", "scene3"):
+        if interaction.get("scene") in ("scene1", "scene2", "scene3") and not is_priority:
             item_id = interaction.get("item_id", "")
             post_content = await self.db.get_item_post_content(item_id)
             post_rich = await self.db.get_item_post_rich_content(item_id)
@@ -761,7 +768,7 @@ class Notifier:
             subject = f"【EchoWatch】UP主「{up_name}」置顶动态有更新"
         else:
             subject = f"【EchoWatch】UP主「{up_name}」有新互动"
-        html = build_single_email(interaction, up_name, item_type, post_content=post_content, post_rich_content=post_rich, oid_map=oid_map)
+        html = build_single_email(interaction, up_name, item_type, post_content=post_content, post_rich_content=post_rich, oid_map=oid_map, include_post_context=not is_priority)
 
         result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
         if result:
@@ -1000,12 +1007,13 @@ class Notifier:
             if item_id and item_id not in oid_map:
                 oid_map[item_id] = await self.db.get_item_comment_oid(item_id)
 
-        # 复用场景二同款汇总模板
+        # 复用场景二同款汇总模板；priority 不附原帖内容 → 传入抑制集合
         html = build_digest_email(
             subs, up_name,
             title=f"置顶动态子评论汇总 ({now_str})",
             today_count=today_count,
             oid_map=oid_map,
+            suppress_post_context_ids={it["item_id"] for it in subs if it.get("item_id")},
         )
 
         result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
@@ -1049,9 +1057,17 @@ class Notifier:
         # 今日累计：按 UP 查库（含已入日报的，体现全天总量）
         today_count = len(await self.db.get_today_interactions(up_uid)) if up_uid else len(interactions)
 
+        # priority 项不附原帖内容：日报也与即时通知同规则，按 item_id 逐条抑制
+        priority_ids = await self.db.get_priority_item_ids()
+        suppress_ids = {
+            it["item_id"] for it in interactions
+            if it.get("item_id") and it.get("item_id") in priority_ids
+        }
+
         html = build_digest_email(interactions, up_name, post_contents,
                                   post_rich_contents=post_rich_map,
-                                  today_count=today_count, oid_map=oid_map)
+                                  today_count=today_count, oid_map=oid_map,
+                                  suppress_post_context_ids=suppress_ids)
 
         result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
         if result:

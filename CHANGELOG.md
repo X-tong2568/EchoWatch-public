@@ -1,3 +1,19 @@
+## v1.8.6 (2026-08-25) — priority 通知不附原帖内容（确定性排除）
+
+### 修复
+
+- **priority 通知邮件仍会附原帖内容卡片**（`email_notifier.py`）：v1.8.5 放开原帖上下文卡片后，
+  模板对 priority 的排除依赖"priority 项不截图 → 文件不存在 → 自然无卡片"，但该前提不成立：
+  1. 文本降级分支只要库里存有原帖正文（如动态先作为普通项入库、后续转正为置顶）就会渲染"原帖内容"卡片
+  2. 截图分支同理，转正前留下的历史截图也会被嵌入
+  现改为开关式确定性排除：`build_single_email` 新增 `include_post_context` 参数
+  （priority 传 False，整体跳过原帖卡片并跳过正文查询）；`build_digest_email` 新增
+  `suppress_post_context_ids` 集合，由 priority 子评论汇总与**日报**分别传入，
+  逐条抑制 priority 项的原帖内容
+  - 非 priority 的场景一/二/三通知行为不变
+
+---
+
 ## v1.8.5 (2026-08-24) — 场景一通知附原帖截图
 
 ### 新增
