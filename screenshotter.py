@@ -264,15 +264,22 @@ class Screenshotter:
                 await asyncio.sleep(0.3)
                 await card.screenshot(path=path)
             else:
-                # 降级：找不到卡片元素时全页截图（兼容B站DOM变更），但先校验页面非空白
+                # 降级：找不到卡片元素时先校验页面非空白，再按页面类型截图
                 body_text = await page.evaluate(
                     "() => document.body ? document.body.innerText.trim() : ''"
                 )
                 body_imgs = await page.locator("img").count()
                 if not body_text and body_imgs == 0:
                     raise RuntimeError(f"页面内容为空(空白/未渲染): {dynamic_id}")
-                logger.warning(f"未找到动态卡片元素，降级为全页截图 ({dynamic_id})")
-                await page.screenshot(path=path, full_page=True)
+                if is_av_fallback:
+                    # av 降级项访问的是视频播放页，无动态卡片可截：
+                    # 只截视口（播放器+标题区，固定高度），不作全页截图——
+                    # 全页会把侧边推荐视频一起截进来，生成超长图（2026-08-26 事故）
+                    logger.warning(f"视频页截图(av降级项)，仅截视口 ({dynamic_id})")
+                    await page.screenshot(path=path)
+                else:
+                    logger.warning(f"未找到动态卡片元素，降级为全页截图 ({dynamic_id})")
+                    await page.screenshot(path=path, full_page=True)
             logger.info(f"动态截图: {path}")
             return path
         finally:

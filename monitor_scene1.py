@@ -298,8 +298,9 @@ class Scene1Monitor:
         new_level = self._check_level_transition(item)
         if new_level != item["monitor_level"]:
             await self.db.set_level(item_id, new_level)
-            if new_level == 0:
-                return  # 已归档，跳过本轮
+            # 级别变更后本轮结束，下一轮按新级别处理：
+            # 防止刚入库的历史帖降级时顺带扫评论区，把历史评论/历史点赞当新互动
+            return
 
         # 尝试解析 OID
         try:

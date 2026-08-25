@@ -256,8 +256,24 @@ class Database:
             pub_ts_int = 0
         if pub_ts_int > 0:
             first_seen = datetime.fromtimestamp(pub_ts_int).strftime("%Y-%m-%d %H:%M:%S")
+            # 初始级别按发布时间年龄计算，防止"旧帖入库即 L1 被立即轮询"：
+            # 发现层（尤其空间动态API风控时的视频列表降级）会把历史投稿整批拉入，
+            # 若 L1 硬编码并立即轮询，会把老帖评论区里的历史评论当新互动推送
+            # （2026-08-26 事故：两年前联合投稿视频下的历史评论被当新互动推送）。
+            # 阈值与 config.thresholds 对齐（level1_hours=24 / level2_hours=120）。
+            if is_priority:
+                init_level = 1  # 置顶/priority 必须 L1，不进归档
+            else:
+                age_hours = (datetime.now() - datetime.fromtimestamp(pub_ts_int)).total_seconds() / 3600
+                if age_hours > 120:
+                    init_level = 0  # 发布超120h：入库即归档，不进轮询队列
+                elif age_hours > 24:
+                    init_level = 2
+                else:
+                    init_level = 1
         else:
             first_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            init_level = 1
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         sql = """
@@ -265,11 +281,11 @@ class Database:
             (item_id, comment_oid, item_type, source, up_uid, topic_id,
              first_seen_at, last_polled_at, monitor_level, is_priority,
              post_content, post_rich_content)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         cursor = await self._conn.execute(sql, (
             item_id, comment_oid, item_type, source, up_uid, topic_id,
-            first_seen, now, 1 if is_priority else 0,
+            first_seen, now, init_level, 1 if is_priority else 0,
             post_content, post_rich_content,
         ))
         await self._conn.commit()
