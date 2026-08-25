@@ -427,7 +427,7 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
     parent_author = interaction.get("parent_author", "")
     discovered_at = interaction.get("discovered_at", "")
 
-    scene_name = "自身作品" if scene == "scene1" else ("话题互动" if scene == "scene2" else "切片视频")
+    scene_name = "自身作品" if scene == "scene1" else ("话题互动" if scene == "scene2" else ("其他UP动态" if scene == "scene4" else "切片视频"))
     reply_type = "子评论" if is_sub else "主评论"
     # comment_oid（真实 aid）映射：视频评论用视频页链接，动态评论用动态页链接
     aid = (oid_map or {}).get(item_id, "")
@@ -439,7 +439,7 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
     # 不用"文件恰好不存在"做排除：priority 动态可能先作为普通项入库（留有历史截图），
     # 或库里存有正文，这两种情况都会让原帖卡片意外出现，故用开关做确定性排除。
     post_context_html = ""
-    if include_post_context and scene in ("scene1", "scene2", "scene3"):
+    if include_post_context and scene in ("scene1", "scene2", "scene3", "scene4"):
         expected_shot = str(SENT_DIR / f"dynamic_{item_id}.png")
         screenshot_html = _embed_screenshot(expected_shot)
         if screenshot_html:
@@ -567,7 +567,7 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         parent_author = interaction.get("parent_author", "")
         discovered_at = interaction.get("discovered_at", "")
 
-        scene_name = "自身作品" if scene == "scene1" else ("话题互动" if scene == "scene2" else "切片视频")
+        scene_name = "自身作品" if scene == "scene1" else ("话题互动" if scene == "scene2" else ("其他UP动态" if scene == "scene4" else "切片视频"))
         reply_type = "子评论" if is_sub else "主评论"
         # comment_oid（真实 aid）映射：视频评论用视频页链接（场景三/视频动态必须，动态ID≠aid）
         comment_url = build_comment_url(item_id, "", rpid, oid_map.get(item_id, ""))
@@ -576,7 +576,7 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         # 截图路径 = sent_emails/dynamic_{item_id}.png（场景二/三入库时生成，场景一入库/补截循环生成）
         # suppress_post_context_ids 内的项（priority）不附原帖内容，确定性排除
         post_context_html = ""
-        if scene in ("scene1", "scene2", "scene3") and item_id not in (suppress_post_context_ids or ()):
+        if scene in ("scene1", "scene2", "scene3", "scene4") and item_id not in (suppress_post_context_ids or ()):
             expected_shot = str(SENT_DIR / f"dynamic_{item_id}.png")
             screenshot_html = _embed_screenshot(expected_shot)
             if screenshot_html:
@@ -755,7 +755,7 @@ class Notifier:
         post_content = ""
         post_rich = ""
         oid_map = {}
-        if interaction.get("scene") in ("scene1", "scene2", "scene3") and not is_priority:
+        if interaction.get("scene") in ("scene1", "scene2", "scene3", "scene4") and not is_priority:
             item_id = interaction.get("item_id", "")
             post_content = await self.db.get_item_post_content(item_id)
             post_rich = await self.db.get_item_post_rich_content(item_id)
@@ -966,6 +966,53 @@ class Notifier:
             _archive_email(f"{ts}_scene3_batch_{len(interactions)}条.html", html)
         else:
             logger.error("场景三批量邮件发送失败")
+
+    async def send_scene4_batch(self, up_name: str = ""):
+        """场景四批量发送：将所有待通知的场景四互动（其他UP帖子下目标UP主回复）合并为一封邮件"""
+        if not self.config.notify.immediate:
+            return
+
+        interactions = await self.db.get_unnotified_immediate(scene="scene4")
+        if not interactions:
+            return
+
+        # 批量查原帖正文和富内容（其他UP动态正文，邮件上下文用）
+        post_contents = {}
+        post_rich_map = {}
+        oid_map = {}
+        for it in interactions:
+            item_id = it.get("item_id", "")
+            if item_id and item_id not in post_contents:
+                pc = await self.db.get_item_post_content(item_id)
+                pr = await self.db.get_item_post_rich_content(item_id)
+                if pc:
+                    post_contents[item_id] = pc
+                if pr:
+                    post_rich_map[item_id] = pr
+                oid_map[item_id] = await self.db.get_item_comment_oid(item_id)
+
+        now_str = datetime.now().strftime("%H:%M")
+        subject = f"【EchoWatch】UP主「{up_name}」在其他UP动态有新互动（{len(interactions)}条）"
+
+        # 今日累计：按本批涉及的 UP 分别查库求和（今日的应该累加，本轮条数只是本次发送量）
+        today_count = 0
+        for uid in {it.get("up_uid", "") for it in interactions if it.get("up_uid")}:
+            today_count += len(await self.db.get_today_interactions(uid))
+
+        html = build_digest_email(interactions, up_name, post_contents,
+                                  post_rich_contents=post_rich_map,
+                                  title=f"在其他UP动态互动即时汇总 ({now_str})",
+                                  today_count=today_count, oid_map=oid_map)
+
+        result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
+        if result:
+            ids = [i["id"] for i in interactions]
+            await self.db.mark_notified_immediate(ids)
+            logger.info(f"场景四批量邮件已发送: {len(interactions)} 条互动")
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            _archive_email(f"{ts}_scene4_batch_{len(interactions)}条.html", html)
+        else:
+            logger.error("场景四批量邮件发送失败")
 
     async def send_priority_sub_batch(self, up_name: str = "", up_uid: str = None):
         """

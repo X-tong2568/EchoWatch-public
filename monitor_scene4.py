@@ -1,5 +1,5 @@
-# monitor_scene3.py
-"""EchoWatch 场景三：监测切片UP主投稿评论区中目标UP主的回复"""
+# monitor_scene4.py
+"""EchoWatch 场景四：监测其他UP主动态/投稿/专栏评论区中目标UP主的评论/回复"""
 
 import asyncio
 import random
@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from bili_client import BiliClient, SUB_COMMENT_PAGE_SIZE, parse_comment, parse_sub_comment
-from config import Config, ClipUpConfig
+from config import Config, OtherUpConfig
 from database import Database
 from logger_config import logger
 
@@ -22,18 +22,19 @@ MAX_SUB_PAGES = 100
 SUB_SWEEP_REQUEST_INTERVAL = 0.8
 
 
-class Scene3Monitor:
+class Scene4Monitor:
     """
-    场景三：监测切片UP主投稿视频的评论区，匹配目标UP主的评论/回复。
+    场景四：监测其他UP主动态/投稿/专栏的评论区，匹配目标UP主的评论/回复。
 
-    与场景一/二的区别：
-    - 匹配对象是配置的 target_uid，不是作品归属者（切片员）
-    - 不检查 up_action.like（那是切片员的点赞，不是目标UP主的互动）
-    - 不监测置顶/priority（切片员的置顶与目标UP主回复无关）
+    与其他场景的区别：
+    - 匹配对象是配置的 target_uid（目标UP主），不是作品归属者（其他UP）
+    - 不检查 up_action.like（那是作品作者的点赞，不是目标UP主的互动）
+    - 不监测置顶/priority（其他UP的置顶与目标UP主回复无关）
+    - 无即时单发，互动由调度循环批量合并通知（同场景二/三）
 
-    两阶段轮询（同场景一）：
-    - 阶段A：拉取切片员空间动态列表 → 新视频入库（source="scene3"）
-    - 阶段B：轮询监测队列中各视频的评论区，匹配目标UP主的评论/回复
+    两阶段轮询（同场景三）：
+    - 阶段A：拉取其他UP空间动态列表 → 新帖子入库（source="scene4"）
+    - 阶段B：轮询监测队列中各帖子的评论区，匹配目标UP主的评论/回复
 
     分级：L1（0~24h）→ L2（24~120h）→ L0（归档），与场景一相同阈值。
     子评论：rcount 基线节流（有评论数量字段 → 场景2式节流）。
@@ -46,31 +47,33 @@ class Scene3Monitor:
         self.client = client
         self.config = config
         self.screenshotter = screenshotter  # 入库截图用（混合策略，同场景一）
-        self.target_uid = config.scene3.target_uid  # 目标UP主UID
+        self.target_uid = config.scene4.target_uid  # 目标UP主UID（目标UP主）
         self._polling_l1 = False
         self._polling_l2 = False
         self._disabled_until: dict = {}  # item_id → 跳过轮询截止时间（评论已关闭的帖子）
 
     # ==========================================================
-    # 阶段A：发现切片员新投稿
+    # 阶段A：发现其他UP新动态
     # ==========================================================
 
-    async def discover(self, clip_up: ClipUpConfig):
+    async def discover(self, other_up: OtherUpConfig):
         """
-        拉取切片员空间动态列表，发现新视频并加入监测队列。
+        拉取其他UP空间动态列表（含动态/投稿/专栏），发现新帖子并加入监测队列。
 
-        策略（同场景一发现）：
-        - 全部入库（已存在的跳过），pub_ts 作为 first_seen_at → 旧切片自动落 L2/L0
+        策略（同场景三发现）：
+        - 全部入库（已存在的跳过），pub_ts 作为 first_seen_at → 旧帖自动落 L2/L0
         - 混合截图：小批量（≤单批上限）入库时立即截，超限暂缓标记待补截，
           由补截循环分批补齐（首次大量入库不阻塞发现流程）
+        - 跨场景去重：comment_oid 已被其他场景占用则跳过（场景一不受限，
+          联合投稿场景由场景一先手，此处自然跳过，不会双份监测）
 
         Args:
-            clip_up: 切片员配置（uid、name）
+            other_up: 其他UP配置（uid、name）
         """
         try:
-            dynamics = await self.client.get_user_dynamics(clip_up.uid)
+            dynamics = await self.client.get_user_dynamics(other_up.uid)
         except Exception as e:
-            logger.error(f"获取切片员动态列表失败 (UP={clip_up.name}): {e}")
+            logger.error(f"获取其他UP动态列表失败 (UP={other_up.name}): {e}")
             return
 
         new_count = 0
@@ -86,12 +89,12 @@ class Scene3Monitor:
             if not dyn_id or not comment_oid:
                 continue
 
-            # 跨场景去重：同一评论区（同一视频aid）已被其他场景占用则跳过
-            # （如场景二话题帖已监测该视频，避免双份监测与场景归属混乱；场景一不受限）
+            # 跨场景去重：同一评论区已被其他场景占用则跳过
+            # （与场景三同规则，防双份监测与场景归属混乱；场景一不受限）
             existing = await self.db.get_item_by_comment_oid(comment_oid)
             if existing and existing["item_id"] != dyn_id:
                 logger.debug(
-                    f"切片评论区已被监测 (oid={comment_oid} item={existing['item_id']})，跳过 {dyn_id}"
+                    f"评论区已被监测 (oid={comment_oid} item={existing['item_id']})，跳过 {dyn_id}"
                 )
                 continue
 
@@ -99,8 +102,8 @@ class Scene3Monitor:
                 item_id=dyn_id,
                 comment_oid=comment_oid,
                 item_type=dyn_type,
-                source="scene3",
-                up_uid=clip_up.uid,
+                source="scene4",
+                up_uid=other_up.uid,
                 pub_ts=pub_ts,
             )
             if inserted:
@@ -126,27 +129,27 @@ class Scene3Monitor:
                 await self.db.update_comment_oid(dyn_id, comment_oid)
 
         if new_count > 0:
-            logger.info(f"[{clip_up.name}] 场景三发现 {new_count} 个新切片")
+            logger.info(f"[{other_up.name}] 场景四发现 {new_count} 个新帖子")
 
     # ==========================================================
-    # 阶段B：轮询视频评论区
+    # 阶段B：轮询帖子评论区
     # ==========================================================
 
-    async def poll_all(self, clip_up: ClipUpConfig):
+    async def poll_all(self, other_up: OtherUpConfig):
         """
-        轮询所有 Level 1 切片视频的评论区（高频）。
+        轮询所有 Level 1 帖子的评论区（高频）。
         加防重入锁：上一轮没跑完则跳过，避免重叠。
         """
         if self._polling_l1:
-            logger.debug(f"[{clip_up.name}] 场景三L1轮询跳过（上一轮未完成）")
+            logger.debug(f"[{other_up.name}] 场景四L1轮询跳过（上一轮未完成）")
             return
         self._polling_l1 = True
         try:
-            level1_items = await self.db.get_items_by_level(1, source="scene3")
-            # 只轮询本切片员的视频（多切片员时互不干扰）
-            items = [it for it in level1_items if it.get("up_uid") == clip_up.uid]
+            level1_items = await self.db.get_items_by_level(1, source="scene4")
+            # 只轮询本其他UP的帖子（多UP时互不干扰）
+            items = [it for it in level1_items if it.get("up_uid") == other_up.uid]
 
-            logger.debug(f"[{clip_up.name}] 场景三轮询: Level1={len(items)}")
+            logger.debug(f"[{other_up.name}] 场景四轮询: Level1={len(items)}")
 
             for item in items:
                 await asyncio.sleep(random.uniform(
@@ -154,25 +157,25 @@ class Scene3Monitor:
                     self.config.intervals.random_delay_max,
                 ))
                 try:
-                    await self._poll_item(item, clip_up)
+                    await self._poll_item(item, other_up)
                 except Exception as e:
-                    logger.error(f"场景三轮询失败 item={item['item_id']}: {e}")
+                    logger.error(f"场景四轮询失败 item={item['item_id']}: {e}")
         finally:
             self._polling_l1 = False
 
-    async def poll_level2(self, clip_up: ClipUpConfig):
-        """低频轮询 Level 2 切片视频（24~120h 的旧切片）"""
+    async def poll_level2(self, other_up: OtherUpConfig):
+        """低频轮询 Level 2 帖子（24~120h 的旧帖）"""
         if self._polling_l2:
-            logger.debug(f"[{clip_up.name}] 场景三L2轮询跳过（上一轮未完成）")
+            logger.debug(f"[{other_up.name}] 场景四L2轮询跳过（上一轮未完成）")
             return
         self._polling_l2 = True
         try:
-            level2_items = await self.db.get_items_by_level(2, source="scene3")
-            items = [it for it in level2_items if it.get("up_uid") == clip_up.uid]
+            level2_items = await self.db.get_items_by_level(2, source="scene4")
+            items = [it for it in level2_items if it.get("up_uid") == other_up.uid]
             if not items:
                 return
 
-            logger.debug(f"[{clip_up.name}] 场景三L2轮询: {len(items)} 个")
+            logger.debug(f"[{other_up.name}] 场景四L2轮询: {len(items)} 个")
 
             for item in items:
                 await asyncio.sleep(random.uniform(
@@ -180,18 +183,18 @@ class Scene3Monitor:
                     self.config.intervals.random_delay_max,
                 ))
                 try:
-                    await self._poll_item(item, clip_up)
+                    await self._poll_item(item, other_up)
                 except Exception as e:
-                    logger.error(f"场景三L2轮询失败 item={item['item_id']}: {e}")
+                    logger.error(f"场景四L2轮询失败 item={item['item_id']}: {e}")
         finally:
             self._polling_l2 = False
 
-    async def recheck_all_levels(self, clip_up: ClipUpConfig):
+    async def recheck_all_levels(self, other_up: OtherUpConfig):
         """
-        定期重新分级：遍历所有活跃的 scene3 监测项，按 first_seen_at 重新算级别。
+        定期重新分级：遍历所有活跃的 scene4 监测项，按 first_seen_at 重新算级别。
         确保不依赖轮询也能正常 L1→L2→L0 流转。
         """
-        items = await self.db.get_active_items_by_source("scene3")
+        items = await self.db.get_active_items_by_source("scene4")
         changed = 0
         for item in items:
             new_level = self._check_level_transition(item)
@@ -199,7 +202,7 @@ class Scene3Monitor:
                 await self.db.set_level(item["item_id"], new_level)
                 changed += 1
         if changed > 0:
-            logger.info(f"[{clip_up.name}] 场景三重新分级: {changed} 条变更")
+            logger.info(f"[{other_up.name}] 场景四重新分级: {changed} 条变更")
 
     def _check_level_transition(self, item: dict) -> int:
         """
@@ -222,25 +225,25 @@ class Scene3Monitor:
 
         t = self.config.thresholds
         if current_level == 1 and age_hours > t.level1_hours:
-            logger.info(f"场景三降级: {item['item_id']} Level 1→2 ({age_hours:.1f}h)")
+            logger.info(f"场景四降级: {item['item_id']} Level 1→2 ({age_hours:.1f}h)")
             return 2
         if current_level == 2 and age_hours > t.level2_hours:
-            logger.info(f"场景三归档: {item['item_id']} Level 2→0 ({age_hours:.1f}h)")
+            logger.info(f"场景四归档: {item['item_id']} Level 2→0 ({age_hours:.1f}h)")
             return 0
 
         return current_level
 
     # ==========================================================
-    # 轮询单个视频的评论区
+    # 轮询单个帖子的评论区
     # ==========================================================
 
-    async def _poll_item(self, item: dict, clip_up: ClipUpConfig):
+    async def _poll_item(self, item: dict, other_up: OtherUpConfig):
         """
-        轮询单个切片视频的评论区（匹配 mid == target_uid）。
+        轮询单个帖子的评论区（匹配 mid == target_uid）。
 
         Args:
             item: 数据库中的 monitored_items 行
-            clip_up: 切片员配置
+            other_up: 其他UP配置
         """
         item_id = item["item_id"]
         comment_oid = item.get("comment_oid", "")
@@ -277,7 +280,7 @@ class Scene3Monitor:
                     mode=2,  # 按时间排序
                 )
             except Exception as e:
-                logger.warning(f"场景三评论API失败 page={page} oid={oid}: {e}")
+                logger.warning(f"场景四评论API失败 page={page} oid={oid}: {e}")
                 break
 
             # 评论功能已关闭/无评论（确定性错误）：标记跳过1小时
@@ -311,14 +314,14 @@ class Scene3Monitor:
 
     async def _process_comment(self, raw: dict, oid: int, comment_type, item_id: str) -> bool:
         """
-        处理单条一级评论：仅匹配 target_uid自己的评论。
-        不检查 up_action.like（那是切片员的点赞，语义同场景2）。
+        处理单条一级评论：仅匹配 target_uid（目标UP主）自己的评论。
+        不检查 up_action.like（那是作品作者的点赞，语义同场景3）。
 
         Args:
             raw: API 返回的原始评论数据
             oid: 评论区的 OID
             comment_type: 评论区类型枚举
-            item_id: 所属视频ID
+            item_id: 所属帖子ID
 
         Returns:
             True 表示目标UP主在此评论处有互动（用于统计）
@@ -344,7 +347,7 @@ class Scene3Monitor:
                 "content": content,
                 "rich_content": parsed.get("rich_content", ""),
                 "up_liked": False,
-                "scene": "scene3",
+                "scene": "scene4",
             })
 
         # 子评论（rcount 基线节流：首次见立即翻；rcount 变大 且 距上次翻 ≥ 2min 才翻）
@@ -429,7 +432,7 @@ class Scene3Monitor:
                     root_rpid=root_rpid, page_index=page,
                 )
             except Exception as e:
-                logger.debug(f"场景三子评论API失败 root={root_rpid} page={page}: {e}")
+                logger.debug(f"场景四子评论API失败 root={root_rpid} page={page}: {e}")
                 break  # completed 保持 False → 不打基线
 
             if resp and resp.get("disabled"):
@@ -437,7 +440,7 @@ class Scene3Monitor:
                 return False
             if resp and resp.get("banned"):
                 # -412 风控：本轮跳过，不打基线，下轮重试（防误报）
-                logger.warning(f"场景三子评论风控跳过 root={root_rpid} page={page}")
+                logger.warning(f"场景四子评论风控跳过 root={root_rpid} page={page}")
                 break
 
             subs = resp.get("replies") or [] if resp else []
@@ -454,7 +457,7 @@ class Scene3Monitor:
         if not completed:
             # 窗口没翻完 → 不打基线，下一轮 rcount 仍大于基线时重翻（防永久漏检）
             logger.warning(
-                f"场景三子评论窗口未翻完 root={root_rpid} 已取{len(all_subs)}条 目标={total}，本轮不更新基线"
+                f"场景四子评论窗口未翻完 root={root_rpid} 已取{len(all_subs)}条 目标={total}，本轮不更新基线"
             )
             return False
 
@@ -506,7 +509,7 @@ class Scene3Monitor:
                 "content": parsed["content"],
                 "rich_content": parsed.get("rich_content", ""),
                 "up_liked": False,
-                "scene": "scene3",
+                "scene": "scene4",
             })
 
         return target_found
@@ -519,7 +522,7 @@ class Scene3Monitor:
         """
         子评论基线兜底扫查：不依赖主评论列表可见性。
 
-        直接对 sub_comment_baseline 表里 scene3 的根评论调子评论 API 查权威 count，
+        直接对 sub_comment_baseline 表里 scene4 的根评论调子评论 API 查权威 count，
         count 变大或基线过期时触发完整翻页检测（防静默漏检）。
         无主列表上下文时 root_context 传 None，parent 显示留空。
         """
@@ -527,18 +530,18 @@ class Scene3Monitor:
         if not rows:
             return
 
-        # 切片员 UID → 配置映射（用于日志，仅做 scene3 项的过滤）
-        clip_uids = {clip.uid for clip in self.config.scene3.clip_up_list}
+        # 其他UP UID → 配置映射（仅做 scene4 项的过滤）
+        other_uids = {other.uid for other in self.config.scene4.other_up_list}
 
         checked = 0
         for row in rows:
             item = await self.db.get_item(row["item_id"])
             if not item:
                 continue
-            # 只处理 scene3 的基线（scene1 的由场景一 sweep 负责）
-            if item.get("source") != "scene3":
+            # 只处理 scene4 的基线（其他场景的由各自 sweep 负责）
+            if item.get("source") != "scene4":
                 continue
-            if item.get("up_uid") not in clip_uids:
+            if item.get("up_uid") not in other_uids:
                 continue
 
             try:
@@ -553,7 +556,7 @@ class Scene3Monitor:
             try:
                 resp = await self.client.get_sub_comments(oid, comment_type, root_rpid, 1)
             except Exception as e:
-                logger.debug(f"场景三子评论基线扫查失败 item={row['item_id']} root={root_rpid}: {e}")
+                logger.debug(f"场景四子评论基线扫查失败 item={row['item_id']} root={root_rpid}: {e}")
                 # 失败也占请求配额，同样限速（防密集请求触发风控）
                 await asyncio.sleep(SUB_SWEEP_REQUEST_INTERVAL)
                 continue
@@ -576,7 +579,7 @@ class Scene3Monitor:
                 continue
             checked += 1
             logger.info(
-                f"场景三子评论基线扫查触发: item={row['item_id']} root={root_rpid} "
+                f"场景四子评论基线扫查触发: item={row['item_id']} root={root_rpid} "
                 f"count={count} 基线={row['last_rcount']} 距今={int(gap_sec)}s"
             )
             await self._process_sub_comments(
@@ -587,9 +590,9 @@ class Scene3Monitor:
             )
 
         if checked > 0:
-            logger.info(f"场景三子评论基线扫查: 触发 {checked} 条")
+            logger.info(f"场景四子评论基线扫查: 触发 {checked} 条")
         else:
-            logger.debug(f"场景三子评论基线扫查: 共扫描 {len(rows)} 条基线，无触发")
+            logger.debug(f"场景四子评论基线扫查: 共扫描 {len(rows)} 条基线，无触发")
 
 
 # ============================================================
@@ -597,43 +600,43 @@ class Scene3Monitor:
 # ============================================================
 
 async def _test():
-    """快速验证场景三"""
+    """快速验证场景四"""
     from config import Config
 
     cfg = Config("config.yaml")
     db = await Database(cfg.database.path).initialize()
     client = BiliClient()
 
-    monitor = Scene3Monitor(db, client, cfg)
+    monitor = Scene4Monitor(db, client, cfg)
 
-    if not cfg.scene3.clip_up_list:
-        print("[SKIP] 未配置切片员")
+    if not cfg.scene4.other_up_list:
+        print("[SKIP] 未配置其他UP")
         return
 
-    for clip_up in cfg.scene3.clip_up_list:
-        print(f"\n=== 测试切片员: {clip_up.name} ===")
+    for other_up in cfg.scene4.other_up_list:
+        print(f"\n=== 测试其他UP: {other_up.name} ===")
 
-        # 阶段A：发现新切片
-        await monitor.discover(clip_up)
-        items = await db.get_items_by_level(1, source="scene3")
-        scene3_items = [i for i in items if i.get("up_uid") == clip_up.uid]
-        print(f"[OK] discover: scene3 Level1 共 {len(scene3_items)} 个")
+        # 阶段A：发现新帖子
+        await monitor.discover(other_up)
+        items = await db.get_items_by_level(1, source="scene4")
+        scene4_items = [i for i in items if i.get("up_uid") == other_up.uid]
+        print(f"[OK] discover: scene4 Level1 共 {len(scene4_items)} 个")
 
-        # 阶段B：轮询前2个视频（L1 不足时用 L2 补充）
-        l2 = await db.get_items_by_level(2, source="scene3")
-        candidates = [i for i in (l2 + items) if i.get("up_uid") == clip_up.uid][:2]
+        # 阶段B：轮询前2个帖子（L1 不足时用 L2 补充）
+        l2 = await db.get_items_by_level(2, source="scene4")
+        candidates = [i for i in (l2 + items) if i.get("up_uid") == other_up.uid][:2]
         for item in candidates:
             print(f"  轮询: item_id={item['item_id'][:20]}... oid={item.get('comment_oid','')}")
-            await monitor._poll_item(item, clip_up)
+            await monitor._poll_item(item, other_up)
         print(f"[OK] poll_item 完成")
 
         # 互动记录
         today = await db.get_today_interactions(monitor.target_uid)
-        scene3_today = [i for i in today if i.get("scene") == "scene3"]
-        print(f"[OK] 今日场景三互动: {len(scene3_today)} 条")
+        scene4_today = [i for i in today if i.get("scene") == "scene4"]
+        print(f"[OK] 今日场景四互动: {len(scene4_today)} 条")
 
     await db.close()
-    print("\n[OK] 场景三测试通过")
+    print("\n[OK] 场景四测试通过")
 
 
 if __name__ == "__main__":

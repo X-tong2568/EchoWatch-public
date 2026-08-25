@@ -35,11 +35,26 @@ class Scene3Config:
 
 
 @dataclass
+class OtherUpConfig:
+    """其他UP配置（场景四）"""
+    uid: str                              # 其他UP B站 UID
+    name: str                             # 昵称（日志用，启动时自动获取）
+
+
+@dataclass
+class Scene4Config:
+    """场景四：监测其他UP主动态/投稿/专栏评论区中目标UP主的评论/回复"""
+    target_uid: str = ""                  # 目标UP主UID（在其他UP帖子评论区中匹配这位的评论/回复）
+    other_up_list: list[OtherUpConfig] = field(default_factory=list)  # 其他UP列表（可多个）
+
+
+@dataclass
 class MonitorConfig:
     """场景开关"""
     scene1_enabled: bool = True
     scene2_enabled: bool = True
     scene3_enabled: bool = True
+    scene4_enabled: bool = True
 
 
 @dataclass
@@ -141,6 +156,7 @@ class Config:
         self.up_list = self._parse_up_list(raw.get("up_list", []))
         self.monitor = MonitorConfig(**raw.get("monitor", {}))
         self.scene3 = self._parse_scene3(raw.get("scene3", {}))
+        self.scene4 = self._parse_scene4(raw.get("scene4", {}))
         self.intervals = IntervalsConfig(**raw.get("intervals", {}))
         self.thresholds = ThresholdsConfig(**raw.get("thresholds", {}))
         self.retry = RetryConfig(**raw.get("retry", {}))
@@ -206,6 +222,25 @@ class Config:
             clip_up_list=clip_list,
         )
 
+    def _parse_scene4(self, raw: dict) -> Scene4Config:
+        """解析场景四配置：目标UP主UID + 其他UP列表"""
+        other_list = []
+        for i, item in enumerate(raw.get("other_up_list", [])):
+            if not isinstance(item, dict):
+                raise ValueError(f"scene4.other_up_list[{i}] 必须是字典类型")
+            uid = item.get("uid")
+            name = item.get("name")
+            if not uid:
+                raise ValueError(f"scene4.other_up_list[{i}] 缺少必填字段 'uid'")
+            other_list.append(OtherUpConfig(
+                uid=str(uid),
+                name=name or f"UID:{uid}",
+            ))
+        return Scene4Config(
+            target_uid=str(raw.get("target_uid", "")),
+            other_up_list=other_list,
+        )
+
 
 # ============================================================
 # 快速测试入口
@@ -229,6 +264,11 @@ if __name__ == "__main__":
             print(f"     目标UP主UID: {cfg.scene3.target_uid}")
             for clip in cfg.scene3.clip_up_list:
                 print(f"     切片员: {clip.name} (UID: {clip.uid})")
+        print(f"   场景四: {'开' if cfg.monitor.scene4_enabled else '关'}")
+        if cfg.monitor.scene4_enabled:
+            print(f"     目标UP主UID: {cfg.scene4.target_uid}")
+            for other in cfg.scene4.other_up_list:
+                print(f"     其他UP: {other.name} (UID: {other.uid})")
         print(f"   Level1间隔: {cfg.intervals.level1_poll_seconds}s / Level2间隔: {cfg.intervals.level2_poll_seconds}s")
     except Exception as e:
         print(f"[FAIL] 配置加载失败: {e}")

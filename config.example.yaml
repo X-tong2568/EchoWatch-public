@@ -17,6 +17,7 @@ monitor:
   scene1_enabled: true             # 场景一：UP主自身作品评论区监测
   scene2_enabled: true             # 场景二：话题互动监测
   scene3_enabled: true             # 场景三：切片UP主投稿下目标UP主回复监测
+  scene4_enabled: true             # 场景四：其他UP主动态/投稿/专栏下目标UP主评论监测
 
 # --- 场景三：切片视频评论区监测 ---
 scene3:
@@ -24,6 +25,13 @@ scene3:
   clip_up_list:                    # 切片账号列表（可多个）
     - uid: "切片员UID"
       name: "切片员昵称"
+
+# --- 场景四：其他UP主动态评论区监测 ---
+scene4:
+  target_uid: "目标UP主UID"         # 目标UP主UID，在其他UP帖子评论区中匹配这位的评论/回复
+  other_up_list:                   # 其他UP列表（可多个，填写形式同场景三）
+    - uid: "其他UP的UID"
+      name: "其他UP昵称"
 
 # --- 轮询间隔（秒）---
 intervals:

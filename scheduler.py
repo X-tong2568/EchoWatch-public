@@ -14,6 +14,7 @@ from logger_config import logger
 from monitor_scene1 import Scene1Monitor
 from monitor_scene2 import Scene2Monitor
 from monitor_scene3 import Scene3Monitor
+from monitor_scene4 import Scene4Monitor
 from pinned_dynamic_monitor import check_pinned_dynamic, get_current_pinned_id, sync_pinned_id_to_config
 
 
@@ -33,6 +34,7 @@ class Scheduler:
         scene1: Scene1Monitor,
         scene2: Scene2Monitor,
         scene3: Scene3Monitor,
+        scene4: Scene4Monitor,
         notifier: Notifier,
         screenshotter=None,
     ):
@@ -42,6 +44,7 @@ class Scheduler:
         self.scene1 = scene1
         self.scene2 = scene2
         self.scene3 = scene3
+        self.scene4 = scene4
         self.notifier = notifier
         self.screenshotter = screenshotter  # 截图失败补截用（发送前兜底）
 
@@ -85,16 +88,25 @@ class Scheduler:
             tasks.append(asyncio.create_task(self._scene3_batch_notify_loop()))
             logger.info("场景三调度已启动 (发现+L1轮询+L2轮询+重新分级+子评论基线扫查+批量通知)")
 
+        if self.config.monitor.scene4_enabled and self.config.scene4.other_up_list:
+            tasks.append(asyncio.create_task(self._scene4_discover_loop()))
+            tasks.append(asyncio.create_task(self._scene4_poll_loop()))
+            tasks.append(asyncio.create_task(self._scene4_level2_poll_loop()))
+            tasks.append(asyncio.create_task(self._scene4_relevel_loop()))
+            tasks.append(asyncio.create_task(self._scene4_sweep_loop()))
+            tasks.append(asyncio.create_task(self._scene4_batch_notify_loop()))
+            logger.info("场景四调度已启动 (发现+L1轮询+L2轮询+重新分级+子评论基线扫查+批量通知)")
+
         tasks.append(asyncio.create_task(self._level_transition_loop()))
         tasks.append(asyncio.create_task(self._daily_digest_loop()))
         tasks.append(asyncio.create_task(self._immediate_notify_loop()))
         tasks.append(asyncio.create_task(self._archive_cleanup_loop()))
         logger.info("通用调度任务已启动 (归档+日报+场景一即时通知+留档清理)")
 
-        # 截图补截循环：场景二/三任一启用即启动
-        # （场景三首次入库暂缓截图，靠此循环分批补齐，否则邮件无原帖截图）
+        # 截图补截循环：场景一/二/三/四任一启用即启动
+        # （入库暂缓的截图靠此循环分批补齐，否则邮件无原帖截图）
         if (self.config.monitor.scene1_enabled or self.config.monitor.scene2_enabled
-                or self.config.monitor.scene3_enabled) and self.screenshotter:
+                or self.config.monitor.scene3_enabled or self.config.monitor.scene4_enabled) and self.screenshotter:
             tasks.append(asyncio.create_task(self._screenshot_retry_loop()))
             logger.info(f"截图补截循环已启动: 每 {self.config.screenshot.retry_interval}s 执行")
 
@@ -487,6 +499,91 @@ class Scheduler:
                     await self.notifier.send_scene3_batch(up_name)
             except Exception as e:
                 logger.error(f"场景三批量通知异常: {e}")
+            await asyncio.sleep(interval)
+
+    # ==========================================================
+    # 场景四 调度循环
+    # ==========================================================
+
+    async def _scene4_discover_loop(self):
+        """场景四发现循环：定时拉取其他UP空间动态列表，发现新帖子"""
+        interval = self.config.intervals.discover_interval
+        logger.info(f"场景四发现循环: 每 {interval}s 执行")
+        while self.running:
+            try:
+                for other_up in self.config.scene4.other_up_list:
+                    await self.scene4.discover(other_up)
+            except Exception as e:
+                logger.error(f"场景四发现异常: {e}")
+            await asyncio.sleep(interval)
+
+    async def _scene4_poll_loop(self):
+        """场景四 L1 轮询循环：轮询 Level 1 帖子（24h内，高频）"""
+        interval = self.config.intervals.level1_poll_seconds
+        logger.info(f"场景四 L1 轮询: 每 {interval}s 执行")
+        while self.running:
+            try:
+                for other_up in self.config.scene4.other_up_list:
+                    await self.scene4.poll_all(other_up)
+            except Exception as e:
+                logger.error(f"场景四L1轮询异常: {e}")
+            await asyncio.sleep(interval)
+
+    async def _scene4_level2_poll_loop(self):
+        """场景四 L2 轮询循环：轮询 Level 2 帖子（24~120h，低频）"""
+        interval = self.config.intervals.level2_poll_seconds
+        logger.info(f"场景四 L2 轮询: 每 {interval}s 执行")
+        while self.running:
+            try:
+                for other_up in self.config.scene4.other_up_list:
+                    await self.scene4.poll_level2(other_up)
+            except Exception as e:
+                logger.error(f"场景四L2轮询异常: {e}")
+            await asyncio.sleep(interval)
+
+    async def _scene4_relevel_loop(self):
+        """场景四重新分级循环：每5分钟检查活跃项年龄，触发 L1→L2→L0 流转"""
+        interval = 300  # 5分钟
+        logger.info(f"场景四重新分级: 每 {interval}s 执行")
+        while self.running:
+            try:
+                for other_up in self.config.scene4.other_up_list:
+                    await self.scene4.recheck_all_levels(other_up)
+            except Exception as e:
+                logger.error(f"场景四重新分级异常: {e}")
+            await asyncio.sleep(interval)
+
+    async def _scene4_sweep_loop(self):
+        """场景四子评论基线兜底扫查循环：防主评论列表间歇漏检导致的静默漏检"""
+        interval = self.config.intervals.sub_sweep_interval
+        logger.info(f"场景四子评论基线扫查: 每 {interval}s 执行")
+        while self.running:
+            try:
+                await self.scene4.sweep_sub_comment_baselines()
+            except Exception as e:
+                logger.error(f"场景四子评论基线扫查异常: {e}")
+            await asyncio.sleep(interval)
+
+    async def _scene4_batch_notify_loop(self):
+        """场景四批量通知循环：将队列中的互动合并为一封邮件发送（同场景二/三）"""
+        interval = self.config.intervals.scene2_batch_seconds
+        logger.info(f"场景四批量通知: 每 {interval}s 合并发送")
+        while self.running:
+            try:
+                interactions = await self.db.get_unnotified_immediate(scene="scene4")
+                if interactions:
+                    # 发送前兜底：本次待发互动对应的原帖若无截图，现场补截一次
+                    if self.screenshotter:
+                        await self._retry_screenshot_before_send(interactions)
+                    # 收集涉及的 UP主 名称（互动记录 up_uid=目标UP主）
+                    up_names = sorted({
+                        self._get_up_name(it.get("up_uid", ""))
+                        for it in interactions
+                    })
+                    up_name = "、".join(up_names)
+                    await self.notifier.send_scene4_batch(up_name)
+            except Exception as e:
+                logger.error(f"场景四批量通知异常: {e}")
             await asyncio.sleep(interval)
 
     async def _screenshot_retry_loop(self):
