@@ -52,7 +52,8 @@ VIEWPORT_WIDTH = 700           # 匹配动态卡片宽度（非手机全屏）
 VIEWPORT_HEIGHT = 1200
 # 动态ID白名单：纯数字动态ID 或 av+数字（空间动态API风控降级路径产物），防路径穿越写入异常文件
 _DYNAMIC_ID_RE = re.compile(r"^(av)?\d+$")
-DEVICE_SCALE_FACTOR = 2        # 2x Retina 高清
+DEVICE_SCALE_FACTOR = 2        # 2x Retina 显示清晰度：邮件容器虽只显示560px宽，但2x在手机/高分屏下质感明显更好
+                               # 体积控制靠 JPEG(q82) 压缩 + 嵌入端 76 字符换行保协议合规，无需降分辨率
 BROWSER_RESTART_INTERVAL = 50  # 每 50 次截图重启浏览器
 # 动态卡片 CSS 选择器（照搬 BTCE3.0）
 CARD_SELECTOR = '.bili-dyn-item, [class*="dyn-card"]'
@@ -251,8 +252,10 @@ class Screenshotter:
             await asyncio.sleep(0.3)
     
             # 照搬 BTCE3.0：定位动态卡片元素，只截卡片区域而非整个网页
+            # 统一 JPEG + quality 82：PNG 全尺寸(3~5MB)嵌入邮件产生超长单行
+            # （违反 RFC 5321 的 998 字符行限，SMTP 服务器直接拒发），JPEG 压缩后约 100~300KB
             card = page.locator(CARD_SELECTOR).first
-            path = str(self.save_dir / f"dynamic_{dynamic_id}.png")
+            path = str(self.save_dir / f"dynamic_{dynamic_id}.jpeg")
             if await card.count() > 0:
                 # 内容校验：卡片无文本且无图片说明页面空白/未渲染（白屏、登录遮罩、
                 # 骨架屏），截出来是废图，抛异常走外层重试/降级
@@ -262,7 +265,7 @@ class Screenshotter:
                     raise RuntimeError(f"卡片内容为空(空白/未渲染): {dynamic_id}")
                 await card.scroll_into_view_if_needed()
                 await asyncio.sleep(0.3)
-                await card.screenshot(path=path)
+                await card.screenshot(path=path, type="jpeg", quality=82)
             else:
                 # 降级：找不到卡片元素时先校验页面非空白，再按页面类型截图
                 body_text = await page.evaluate(
@@ -276,10 +279,10 @@ class Screenshotter:
                     # 只截视口（播放器+标题区，固定高度），不作全页截图——
                     # 全页会把侧边推荐视频一起截进来，生成超长图（2026-08-26 事故）
                     logger.warning(f"视频页截图(av降级项)，仅截视口 ({dynamic_id})")
-                    await page.screenshot(path=path)
+                    await page.screenshot(path=path, type="jpeg", quality=82)
                 else:
                     logger.warning(f"未找到动态卡片元素，降级为全页截图 ({dynamic_id})")
-                    await page.screenshot(path=path, full_page=True)
+                    await page.screenshot(path=path, full_page=True, type="jpeg", quality=82)
             logger.info(f"动态截图: {path}")
             return path
         finally:

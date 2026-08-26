@@ -382,10 +382,14 @@ def _base_style(t: dict) -> str:
 
 def _embed_screenshot(screenshot_path: Optional[str]) -> Optional[str]:
     """
-    将截图 PNG 文件读取为 base64 data URI，包裹在 .screenshot 容器中。
+    将截图 JPEG 文件读取为 base64 data URI，包裹在 .screenshot 容器中。
 
     照搬 BTCE3.0 方案：max-width:560px + width:100% 约束图片宽度，
-    适配邮件容器（600px），2x Retina 截图自动缩放。
+    适配邮件容器（600px），1x 截图正常缩放。
+
+    base64 用 encodebytes 每行 76 字符换行（MIME 标准）：SMTP DATA
+    单行上限 998 字符（RFC 5321），大图一行超限会被服务器拒发；
+    data URI 解码器忽略换行字符，浏览器/邮件客户端渲染不受影响。
 
     Args:
         screenshot_path: 截图文件路径
@@ -397,10 +401,10 @@ def _embed_screenshot(screenshot_path: Optional[str]) -> Optional[str]:
         return None
     try:
         with open(screenshot_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("ascii")
+            b64 = base64.encodebytes(f.read()).decode("ascii")
         return (
             '<div class="screenshot">'
-            f'<img src="data:image/png;base64,{b64}" '
+            f'<img src="data:image/jpeg;base64,{b64}" '
             'style="max-width:100%;width:100%;height:auto;border-radius:6px;'
             'box-shadow:0 2px 8px rgba(0,0,0,0.1);" alt="原帖截图">'
             '</div>'
@@ -440,7 +444,7 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
     # 或库里存有正文，这两种情况都会让原帖卡片意外出现，故用开关做确定性排除。
     post_context_html = ""
     if include_post_context and scene in ("scene1", "scene2", "scene3", "scene4"):
-        expected_shot = str(SENT_DIR / f"dynamic_{item_id}.png")
+        expected_shot = str(SENT_DIR / f"dynamic_{item_id}.jpeg")
         screenshot_html = _embed_screenshot(expected_shot)
         if screenshot_html:
             # 截图模式：直接嵌入截图
@@ -573,11 +577,11 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         comment_url = build_comment_url(item_id, "", rpid, oid_map.get(item_id, ""))
 
         # 原帖上下文卡片（截图优先，文本降级）
-        # 截图路径 = sent_emails/dynamic_{item_id}.png（场景二/三入库时生成，场景一入库/补截循环生成）
+        # 截图路径 = sent_emails/dynamic_{item_id}.jpeg（场景二/三入库时生成，场景一入库/补截循环生成）
         # suppress_post_context_ids 内的项（priority）不附原帖内容，确定性排除
         post_context_html = ""
         if scene in ("scene1", "scene2", "scene3", "scene4") and item_id not in (suppress_post_context_ids or ()):
-            expected_shot = str(SENT_DIR / f"dynamic_{item_id}.png")
+            expected_shot = str(SENT_DIR / f"dynamic_{item_id}.jpeg")
             screenshot_html = _embed_screenshot(expected_shot)
             if screenshot_html:
                 # 截图模式：直接嵌入截图

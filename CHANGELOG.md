@@ -1,3 +1,22 @@
+## v1.9.2 (2026-08-26) — 邮件大图超长行拒发修复（JPEG压缩+76字符换行+2x像素密度）
+
+### 修复
+
+- **日报/批量邮件内嵌截图超长单行被 SMTP 服务器拒发**（`email_notifier.py`）：
+  原帖截图以 base64 data URI 内嵌 HTML（`<img src="data:image/png;base64,...">`），
+  多张全尺寸 PNG（单张 3~5MB）累计时形成数 MB 的单一超长行，违反 RFC 5321 的
+  998 字符行上限，SMTP 服务器直接拒发（表现为 "Server not connected"）。
+  修复：base64 改用 `encodebytes` 每行 76 字符换行（MIME 标准；data URI 解码器
+  忽略换行字符，浏览器/邮件客户端渲染不受影响）
+- **截图像素密度与体积控制**（`screenshotter.py`）：截图格式由 PNG 改为 JPEG
+  （quality 82），单张从 3~5MB 降到约 60KB（1400x2400）；保留 2x Retina 密度
+  （邮件容器 560px 宽显示，2x 高清质感不降级），体积由 JPEG 压缩兜底
+- 全链路文件后缀统一 .png → .jpeg：`email_notifier.py`（原文附嵌入两处路径）与
+  `scheduler.py`（发送前补截判断），旧 png 留档由 30 天清理机制处理
+- 修复后日报体积从最大 11MB+ 降到约 0.5MB 级（9 张图满配场景）
+
+---
+
 ## v1.9.1 (2026-08-26) — 历史投稿误推送修复（入库分级+降级跳过+截图视口）
 
 ### 修复

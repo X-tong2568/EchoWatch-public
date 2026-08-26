@@ -639,7 +639,7 @@ class Scheduler:
             item_id = it.get("item_id", "")
             if not item_id:
                 continue
-            if (save_dir / f"dynamic_{item_id}.png").exists():
+            if (save_dir / f"dynamic_{item_id}.jpeg").exists():
                 continue
             try:
                 await self.screenshotter.take_dynamic_screenshot(item_id)
