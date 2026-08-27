@@ -91,6 +91,12 @@ class RetryConfig:
 
 
 @dataclass
+class BreakerConfig:
+    """风控熔断配置（2026-08-27 新增：出口IP被B站-412封禁时自动停手，避免降级风暴空耗资源）"""
+    ratelimit_cooldown_seconds: int = 1800   # 风控熔断冷却时长（秒），默认1800=30分钟；期间跳过空间动态轮询
+
+
+@dataclass
 class EmailConfig:
     """邮件配置"""
     smtp_server: str = "smtp.qq.com"
@@ -160,6 +166,7 @@ class Config:
         self.intervals = IntervalsConfig(**raw.get("intervals", {}))
         self.thresholds = ThresholdsConfig(**raw.get("thresholds", {}))
         self.retry = RetryConfig(**raw.get("retry", {}))
+        self.breaker = BreakerConfig(**raw.get("breaker", {}))
         self.email = EmailConfig(**raw.get("email", {}))
         self.notify = NotifyConfig(**raw.get("notify", {}))
         self.database = DatabaseConfig(**raw.get("database", {}))

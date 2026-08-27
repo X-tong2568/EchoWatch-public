@@ -57,6 +57,12 @@ retry:
   retry_wait_seconds: 50           # 重试等待时间（秒）
   consecutive_fail_limit: 5        # 连续失败跳过阈值
 
+# --- 风控熔断（2026-08-27 新增）---
+# 出口IP被B站封控（-352/-412）时，连续命中3次触发冷却，期间跳过空间动态轮询（缓存兜底），
+# 避免"边被封边疯狂降级"空耗资源；冷却到期自动恢复
+breaker:
+  ratelimit_cooldown_seconds: 1800   # 冷却时长（秒），默认1800=30分钟
+
 # --- 邮件配置 ---
 email:
   smtp_server: "smtp.qq.com"

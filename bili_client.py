@@ -61,6 +61,7 @@ HEADERS = {
 MIXIN_KEY_TTL = 3600
 # 动态列表缓存有效期（秒）：风控期间用最近一次成功结果兜底，超时视为过期
 DYN_CACHE_MAX_AGE = 3600
+RATELIMIT_BREAKER_HITS = 3   # 连续N次风控命中（-352/-412）触发熔断，冷却期内不再请求空间动态接口
 # buvid3 获取失败后的重试节流间隔（秒）：避免每次API调用都打B站首页
 BUVID_RETRY_INTERVAL = 60
 # 子评论每页条数（与B站前端一致，ps=10 比 20 更稳，实测可完整翻页）
@@ -327,8 +328,12 @@ class BiliClient:
     - 自动获取buvid3（匿名设备指纹），仅用于空间动态API
     """
 
-    def __init__(self):
-        """初始化客户端，HTTP会话延迟创建"""
+    def __init__(self, breaker_cooldown_seconds: int = 1800):
+        """
+        初始化客户端，HTTP会话延迟创建。
+
+        breaker_cooldown_seconds: 风控熔断冷却时长（秒，来自 config.breaker.ratelimit_cooldown_seconds）
+        """
         self._session: Optional[aiohttp.ClientSession] = None
         self._sub_session: Optional[aiohttp.ClientSession] = None  # 子评论翻页专用会话（独立CookieJar）
         self._mixin_key: Optional[str] = None
@@ -338,6 +343,10 @@ class BiliClient:
         self._session_lock = asyncio.Lock()
         self._topic_sort_by_cache: dict[int, int] = {}  # topic_id → "最新"排序值
         self._dyn_cache: dict[str, tuple] = {}  # uid → (时间戳, 动态列表)，风控兜底用
+        # 风控熔断状态（2026-08-27 新增）：连续命中 -352/-412 触发冷却，期间只走缓存兜底不发请求
+        self._breaker_cooldown_seconds = breaker_cooldown_seconds
+        self._rl_hit_count = 0            # 连续风控命中计数
+        self._rl_cooldown_until = 0.0     # 熔断冷却截止时间戳（0=未在熔断）
 
     # ----------------------------------------------------------
     # 内部：会话与签名
@@ -553,6 +562,14 @@ class BiliClient:
         # 确保有buvid3（首次访问B站首页获取，仅需一次）
         await self._ensure_buvid()
 
+        # 风控熔断：冷却期内不发起任何请求，直接缓存兜底（无缓存返回空列表），
+        # 防止 -412 期间"边被封边疯狂降级"的反向恶化与资源空耗
+        if self._is_breaker_open():
+            cached = self._get_dyn_cache(uid)
+            if cached is not None:
+                return cached
+            return []
+
         # 空间动态API需要 buvid3 + WBI签名（缺一不可）
         try:
             data = await self._signed_get(SPACE_FEED_URL, {"host_mid": uid})
@@ -563,6 +580,9 @@ class BiliClient:
                 logger.info(f"获取 {uid} 空间动态: {len(items)} 条")
                 return result
         except RuntimeError as e:
+            if self._is_risk_control_error(e):
+                # 风控命中计入熔断计数（空间动态+降级搜索各计1次）
+                self._record_ratelimit_hit()
             logger.info(f"空间动态API失败，降级视频搜索 uid={uid}: {e}")
 
         # 降级：WBI签名视频搜索（仅覆盖视频作品）
@@ -573,6 +593,7 @@ class BiliClient:
         except RuntimeError as e:
             # 风控错误：放弃本轮（不重试），有未过期缓存则兜底返回
             if self._is_risk_control_error(e):
+                self._record_ratelimit_hit()
                 cached = self._get_dyn_cache(uid)
                 if cached is not None:
                     return cached
@@ -606,6 +627,32 @@ class BiliClient:
         """判断是否为风控类错误（-352风控校验失败 / -412请求被封禁），这类错误重试无益"""
         msg = str(e)
         return "code=-352" in msg or "code=-412" in msg
+
+    def _is_breaker_open(self) -> bool:
+        """
+        风控熔断是否生效：冷却期内不再请求B站接口（缓存兜底），到期自动解除。
+
+        Returns:
+            True=熔断中（调用方应跳过正式请求，返回缓存/空）
+        """
+        if time.time() < self._rl_cooldown_until:
+            return True
+        if self._rl_cooldown_until > 0:
+            # 冷却到期：复位熔断标志，恢复正式轮询
+            self._rl_cooldown_until = 0.0
+            logger.info("风控熔断解除，恢复空间动态轮询")
+        return False
+
+    def _record_ratelimit_hit(self) -> None:
+        """记录一次风控命中（-352/-412）；连续命中达到阈值触发熔断冷却"""
+        self._rl_hit_count += 1
+        if self._rl_hit_count >= RATELIMIT_BREAKER_HITS:
+            self._rl_hit_count = 0
+            self._rl_cooldown_until = time.time() + self._breaker_cooldown_seconds
+            logger.warning(
+                f"风控连续命中 {RATELIMIT_BREAKER_HITS} 次，触发熔断 "
+                f"{self._breaker_cooldown_seconds}s（期间跳过空间动态轮询）"
+            )
 
     def _update_dyn_cache(self, uid: str, result: list) -> None:
         """缓存最近一次成功的动态列表（风控期间兜底用）"""
