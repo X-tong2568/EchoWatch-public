@@ -108,6 +108,19 @@ class Scene4Monitor:
             )
             if inserted:
                 new_count += 1
+                # 老帖（发布超120h，入库即归档L0）不截图也不标记待补截：
+                # 风控降级拉入的历史投稿不会进轮询队列，原帖截图无邮件用途，
+                # 无谓的浏览器页面加载会烧掉大量机场流量（2026-08-28 流量事故）。
+                # pub_ts 可能是字符串（B站API），先转int，异常按0处理=不跳过
+                try:
+                    pub_ts_int = int(float(pub_ts))
+                except (ValueError, TypeError):
+                    pub_ts_int = 0
+                if pub_ts_int > 0 and (
+                    (datetime.now() - datetime.fromtimestamp(pub_ts_int)).total_seconds()
+                    > self.config.thresholds.level2_hours * 3600
+                ):
+                    continue
                 # 混合截图策略（同场景一）：小批量立即截，超限暂缓标记待补截；
                 # 截图失败也占本轮额度（防慢，失败留待补截循环重试）
                 if self.screenshotter:
