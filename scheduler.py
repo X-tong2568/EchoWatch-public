@@ -346,6 +346,12 @@ class Scheduler:
                 if now.hour == target_hour and not self._digest_sent_today:
                     sent = await self.db.is_digest_sent_today(today_str)
                     if not sent:
+                        # v2.0：日报前给"推送时没截到"的互动再补一次原帖截图（最后兜底）。
+                        # 截图是内容兜底（B站纯文本提取常为空白），日报作为终版汇总
+                        # 应尽力补全；失败/该条仍文本降级，不阻塞
+                        if self.screenshotter:
+                            digest_pending = await self.db.get_unnotified_digest()
+                            await self._retry_screenshot_before_send(digest_pending)
                         for up in self.config.up_list:
                             await self.notifier.send_daily_digest(up.name, up.uid)
                         await self.db.mark_digest_sent(today_str)
@@ -633,20 +639,18 @@ class Scheduler:
                 logger.error(f"留档清理异常: {e}")
             await asyncio.sleep(interval)
 
-    async def _retry_screenshot_before_send(self, interactions: list, max_shots: int = 3):
+    async def _retry_screenshot_before_send(self, interactions: list):
         """
-        发送前按需补截：待发互动的原帖若无截图文件则现场补截，最多 max_shots 张。
+        发送前按需补截：待发互动的原帖若无截图文件则现场补截。
 
         v2.0 起为唯一截图时机（入库不再截图）——只有真产生目标互动的帖子才会被截，
-        截图每次最多 3 张：超限/失败/超时直接空着发送（邮件自动降级文本渲染），
-        不阻塞邮件不形成积压，机场流量随推送按需付费。
+        且截图是最终内容兜底（B站纯文本提取常为空白，见 CHANGELOG 已知限制），
+        所以不设张数上限：本批有多少互动就截多少（互动数本身有界，每张约2~5s，
+        多等几秒无妨），单张失败/超时则该条空着（邮件自动降级文本渲染），
+        不阻塞发送不形成积压。
         """
         save_dir = Path(self.config.screenshot.save_dir)
-        shots = 0
         for it in interactions:
-            if shots >= max_shots:
-                logger.info(f"发送前补截已达上限 ({max_shots} 张)，其余互动邮件内空着原帖图")
-                break
             item_id = it.get("item_id", "")
             if not item_id:
                 continue
@@ -657,7 +661,6 @@ class Scheduler:
                 logger.info(f"发送前补截成功: {item_id}")
             except Exception as e:
                 logger.warning(f"发送前补截失败 ({item_id}): {e}")
-            shots += 1
 
     # ==========================================================
     # 辅助方法
