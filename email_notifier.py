@@ -754,6 +754,13 @@ class Notifier:
         if not self.config.notify.immediate:
             return
 
+        # P0-5 原子认领（2026-08-29）：30s 即时循环与 priority 内联发送可能
+        # 取到同一条未发送互动，双方"发送成功后才标记"有竞态窗口。
+        # 发送前先抢行（notified_immediate=0→1），抢不到说明已被另一通道
+        # 认领/发送，直接放弃；发送失败回滚认领，下轮重试。
+        if not await self.db.claim_notified_immediate(interaction["id"]):
+            return
+
         # 全部场景：查原帖正文和富内容（截图由 builder 自动读取，文本作降级）
         # priority 不附原帖内容：跳过查询，模板层也整体跳过渲染
         post_content = ""
@@ -776,13 +783,15 @@ class Notifier:
 
         result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
         if result:
-            await self.db.mark_notified_immediate([interaction["id"]])
+            # 认领时已置 notified_immediate=1（原子），无需再标记
             cid = interaction.get("comment_id", "")[:30]
             logger.info(f"即时邮件已发送: comment_id={cid}...")
             # 留档
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             _archive_email(f"{ts}_immediate_{cid}.html", html)
         else:
+            # 发送失败：回滚认领，下轮重试（保持"发送成功才标记"语义）
+            await self.db.release_notified_immediate(interaction["id"])
             logger.warning("即时邮件发送失败")
 
     async def send_pinned_change(self, up_name: str, up_uid: str,
@@ -1162,7 +1171,7 @@ async def _test():
         "id": 999,
         "up_uid": "000000000",
         "item_id": "999888777000111222",
-        "comment_id": "111222333444",
+        "comment_id": "306073249233",
         "is_sub_reply": False,
         "parent_content": "",
         "parent_author": "",
@@ -1181,7 +1190,7 @@ async def _test():
         "id": 1000,
         "up_uid": "000000000",
         "item_id": "999888777000111222",
-        "comment_id": "111222333555",
+        "comment_id": "309143024560",
         "is_sub_reply": True,
         "parent_content": "UP主今天好可爱！",
         "parent_author": "粉丝小A",

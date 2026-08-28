@@ -128,34 +128,6 @@ class Scene2Monitor:
             if new_count > 0:
                 logger.info(f"[{up.name}] 话题 {topic_id} 发现 {new_count} 个新帖")
 
-    async def retry_screenshots(self):
-        """
-        补截待截图的动态：查询 screenshot_pending=1 的条目逐个补截。
-
-        单批最多 max_per_batch 张（限流），补截成功清除标记，失败保留等下轮。
-        由 scheduler 的补截循环定时调用。
-        """
-        if not self.screenshotter:
-            return
-        try:
-            pending_ids = await self.db.get_screenshot_pending_items(
-                limit=self.config.screenshot.max_per_batch
-            )
-        except Exception as e:
-            logger.error(f"查询待补截列表失败: {e}")
-            return
-        if not pending_ids:
-            return
-        for dyn_id in pending_ids:
-            try:
-                shot_path = await self.screenshotter.take_dynamic_screenshot(dyn_id)
-                if shot_path:
-                    await self.db.clear_screenshot_pending(dyn_id)
-                    logger.info(f"补截成功 ({dyn_id})")
-                else:
-                    logger.warning(f"补截未成功，保留待补截标记 ({dyn_id})")
-            except Exception as e:
-                logger.warning(f"补截异常，保留待补截标记 ({dyn_id}): {e}")
 
     # ==========================================================
     # 阶段B：轮询帖子评论

@@ -108,6 +108,17 @@ class Scene1Monitor:
 
             is_priority = dyn_id in up.priority_dynamics
 
+            # 降级路径去重（2026-08-29 审计）：空间动态 API 风控降级返回 av{aid}
+            # 形式的 item_id，与正常路径的动态 ID 不同，会导致同一作品双份入库
+            # （实测服务器 56 组重复）。按 本场景+同 UP+同评论区 限域查重：
+            # 已有监测项则只修正 oid，不插入新行（不影响"场景一不受限"的跨场景语义）
+            existing = await self.db.get_item_by_comment_oid(
+                comment_oid, source="scene1", up_uid=up.uid
+            )
+            if existing and existing["item_id"] != dyn_id:
+                await self.db.update_comment_oid(existing["item_id"], comment_oid)
+                continue
+
             inserted = await self.db.upsert_item(
                 item_id=dyn_id,
                 comment_oid=comment_oid,
@@ -478,7 +489,8 @@ class Scene1Monitor:
                 return True
             # 新回复在尾部；粉丝删除评论会使位置前移，多翻2页兜底
             start_page = max(1, prev // SUB_PAGE - 2)
-            end_page = (total + SUB_PAGE - 1) // SUB_PAGE
+            # MAX_SUB_PAGES 上限：rcount 暴涨/接口返回虚高值时窗口页数有界（2026-08-29 审计）
+            end_page = min(MAX_SUB_PAGES, (total + SUB_PAGE - 1) // SUB_PAGE)
 
         all_subs = []  # 收集窗口内所有子评论
         completed = False  # 是否翻完预期窗口（未翻完不打基线，下轮重试）
@@ -590,31 +602,32 @@ class Scene1Monitor:
 
         背景：主评论翻页游标格式错误导致 page≥1 全 -400，根评论滑出
         可见窗口后 check 3 永不触发，子评论静默漏检。此扫查直接对
-        sub_comment_baseline 表里每条根评论调子评论 API 查权威 count：
-        - count > 基线 且 距上次翻 ≥ 2min → 完整翻页检测
-        - 基线超过 sub_sweep_max_age（默认2h）→ 强制重新翻页（防 count 不同步）
+        sub_comment_baseline 表里每条根评论调子评论 API 查权威 count。
+
+        2026-08-29 审计改造（风暴镇压）：
+        - 已归档（L0）项基线在 SQL 层过滤（get_all_sub_baselines JOIN），
+          归档即停止监测，不再为 L0 发起任何请求
+        - count > 基线 且 距上次翻 ≥ 2min → 走增量窗口翻页检测（不再全量重翻）
+        - count 无变化 但基线过期（>sub_sweep_max_age）→ 只用权威 count 同步
+          基线（last_rcount + 时间戳），零翻页——原实现此时照样 force_full
+          全量重翻，是 -412 请求风暴的主因（实测单条 rcount 均 ≤10 占比 91%）
 
         无主列表上下文时 root_context 传 None，parent 显示留空。
         """
-        rows = await self.db.get_all_sub_baselines()
+        up_uids = [u.uid for u in self.config.up_list]
+        rows = await self.db.get_all_sub_baselines(up_uids=up_uids)
         if not rows:
             return
-        logger.debug(f"子评论基线扫查: {len(rows)} 条基线")
+        checked = 0   # 实际翻页检测条数
+        synced = 0    # 仅同步权威 count 的条数（零翻页）
         for row in rows:
-            item = await self.db.get_item(row["item_id"])
-            if not item:
-                continue
-            # 找到该作品所属 UP（配置不存在则跳过）
-            up = next((u for u in self.config.up_list if u.uid == item["up_uid"]), None)
-            if up is None:
-                continue
             try:
-                oid = int(item.get("comment_oid") or 0)
+                oid = int(row.get("comment_oid") or 0)
             except (ValueError, TypeError):
                 continue
             if not oid:
                 continue
-            comment_type = self.client.get_comment_type(item["item_type"])
+            comment_type = self.client.get_comment_type(row.get("item_type", ""))
             root_rpid = int(row["root_rpid"])
             # 查第1页拿权威 count（每基线1次请求，节流）
             try:
@@ -632,23 +645,31 @@ class Scene1Monitor:
                 gap_sec = (datetime.now() - last_dt).total_seconds()
             except (ValueError, TypeError):
                 pass
-            # 触发条件：count 变大 且 距上次翻 ≥ 2min；或基线过期强制翻
-            need_check = (count > row["last_rcount"] and gap_sec >= SUB_COMMENT_MIN_INTERVAL) \
-                or gap_sec >= self.config.intervals.sub_sweep_max_age
-            if not need_check:
-                continue
-            logger.info(
-                f"子评论基线扫查触发: item={row['item_id']} root={root_rpid} "
-                f"count={count} 基线={row['last_rcount']} 距今={int(gap_sec)}s"
-            )
-            await self._process_sub_comments(
-                oid, comment_type, root_rpid, item["item_id"], up,
-                root_context=None, replies_count=count,
-                # scene2 含粉丝帖：up_action.like 是发帖粉丝的赞，不检测"觉得很赞"
-                check_up_liked=(item.get("source") != "scene2"),
-                # 强制全量扫查：防"收集不全却误标基线"的截断漏检
-                force_full=True,
-            )
+            if count > row["last_rcount"] and gap_sec >= SUB_COMMENT_MIN_INTERVAL:
+                # 有新增回复 → 增量窗口翻页（force_full=False：sweep 的
+                # 权威 count 本身就是真实末页，无需从第1页全量重翻）
+                checked += 1
+                logger.info(
+                    f"子评论基线扫查触发: item={row['item_id']} root={root_rpid} "
+                    f"count={count} 基线={row['last_rcount']} 距今={int(gap_sec)}s"
+                )
+                up = next((u for u in self.config.up_list if u.uid == row["up_uid"]), None)
+                if up is None:
+                    continue
+                await self._process_sub_comments(
+                    oid, comment_type, root_rpid, row["item_id"], up,
+                    root_context=None, replies_count=count,
+                    # scene2 含粉丝帖：up_action.like 是发帖粉丝的赞，不检测"觉得很赞"
+                    check_up_liked=(row.get("source") != "scene2"),
+                )
+            elif gap_sec >= self.config.intervals.sub_sweep_max_age:
+                # 基线过期但 count 未变：权威 count 同步基线，零翻页
+                synced += 1
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                await self.db.upsert_sub_baseline(row["item_id"], root_rpid, count, now_str)
+        logger.info(
+            f"子评论基线扫查: 基线{len(rows)}条 翻页{checked}条 过期同步{synced}条"
+        )
 
     # ==========================================================
     # 级别升降

@@ -138,13 +138,30 @@ async def main():
     def shutdown():
         logger.info("收到退出信号，正在关闭...")
         scheduler.running = False
+        # 直接取消任务：各循环阻塞在 asyncio.sleep（最长 86400s），仅置标志位
+        # 会让主协程等到最长的 sleep 才执行 scheduler.stop()（pm2 会 1.6s 后
+        # SIGKILL 强杀，留下脏 WAL/半句写库）。handler 在事件循环内执行，cancel 安全。
+        # 2026-08-29 审计修复
+        for t in scheduler._tasks:
+            if not t.done():
+                t.cancel()
 
     try:
-        signal.signal(signal.SIGINT, lambda s, f: shutdown())
-        signal.signal(signal.SIGTERM, lambda s, f: shutdown())
-    except (ValueError, AttributeError):
-        # Windows 下 signal 支持有限，依赖 KeyboardInterrupt
-        pass
+        # asyncio 官方信号注册：handler 由事件循环调度，不会被 select EINTR
+        # 路径漏掉（实测 signal.signal 在 pm2 SIGINT 序列下仍冒 KeyboardInterrupt
+        # 残影，P0-2 修正版 2026-08-29）
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, shutdown)
+    except (ValueError, AttributeError, NotImplementedError):
+        # Windows/受限环境不支持 add_signal_handler：退化 signal.signal
+        # （Windows 下 signal 支持有限，连 signal.signal 失败也依赖 KeyboardInterrupt）
+        try:
+            signal.signal(signal.SIGINT, lambda s, f: shutdown())
+            signal.signal(signal.SIGTERM, lambda s, f: shutdown())
+        except (ValueError, AttributeError):
+            print("信号注册失败，依赖 KeyboardInterrupt")
+            pass
 
     # ----------------------------------------------------------
     # 10. 启动调度器

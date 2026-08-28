@@ -1,3 +1,63 @@
+## v2.1 (2026-08-29) — 子评论扫查风暴镇压 / 通知防重 / 归档级联清理
+
+> 基于一次静态代码审查（审查方：work Buddy）导出问题清单，经本地与线上实测复核后实施。
+
+### 修复
+
+- **子评论基线扫查风暴镇压**（`monitor_scene1/3/4.py` + `database.py`）：
+  - 背景：场景四（58 个其他UP）上线后基线从几十条涨到 4882 条，而 sweep 每 10 分钟
+    全表扫一遍、且基线超 `sub_sweep_max_age`（默认 30 分钟）即无条件 `force_full`
+    **全量重翻**（每条 1~100 页），正是 8/27 磁盘风暴同刻"-412 降级风暴"、
+    8/28 一天 8067 次"风控跳过"的请求主体
+  - 实测量化：基线 4882 条中 91%（4447 条）rcount ≤ 10（单页）、已归档（L0）占
+    2812 条（58%）；纯浪费的翻页估计 6226 页/30 分钟
+  - 改造：`get_all_sub_baselines` JOIN `monitored_items` 在 SQL 层过滤已归档
+    （L0）项并支持 `source`/`up_uids` 过滤（三个 sweep 连逐条 `get_item` 一起省掉）；
+    触发逻辑拆成两条——权威 count > 基线 → 增量窗口翻页（不再全量重翻）；
+    基线过期但 count 无变化 → 仅用权威 count 同步基线（零翻页）
+  - 每个 sweep 循环输出聚合日志：`子评论基线扫查: 基线N条 翻页N条 过期同步N条`
+    （每 10 分钟 3 行，可观测性补齐）
+- **归档级联清理基线**（`database.py`）：`set_level(0)` 与 `archive_stale` 时删除
+  该 item 的 `sub_comment_baseline` —— 归档即停止监测（L0 不可逆），基线随归档
+  删除，表不再随作品轮换单调膨胀（存量一次性清理：4884 → 2055 行）
+- **降级路径重复入库**（`monitor_scene1.py` + `database.py`）：空间动态 API 风控
+  `av{aid}` 前缀降级项与正常动态 ID 存在同一评论区双份（线上实测 56 组），
+  入库前按「来源+UP+评论区」查重，已有监测项只修正 oid 不再插行
+- **通知双通道竞态**（`email_notifier.py` + `database.py`）：30s 即时通知循环与
+  priority 内联发送都能取到同一条未通知互动，本次按原子认领根治：发送前
+  `UPDATE ... SET notified_immediate=1 WHERE id=? AND notified_immediate=0`
+  抢行，抢不到即放弃；发送失败回滚标记下轮重试
+- **优雅退出**（`main.py`）：SIGINT/SIGTERM 不再只置 `running=False`——直接取消
+  全部调度任务（此前 pm2 每次部署都是 1.6s 后 SIGKILL 强杀，留有脏 WAL 风险）；
+  信号注册改用 asyncio 官方 `loop.add_signal_handler`（实测 `signal.signal` 在
+  pm2 停止序列下仍冒 KeyboardInterrupt 残影）
+
+### 加固
+
+- `get_unnotified_immediate` 加 `LIMIT 200` + `discovered_at >= 48h` 过滤：
+  积压时不再整表逐条发信；长时间关闭即时通知后重开，历史存量不再补发风暴
+  （日报走 `get_unnotified_digest` 全量不受限）
+- 子评论日常窗口翻页补 `MAX_SUB_PAGES` 上限（此前仅首次/强制分支有：rcount 暴涨
+  或接口返回虚高值时窗口页数有界）
+- `_backup_and_rebuild` 同时清理 WAL 模式的 `-wal`/`-shm` 残留文件；删除
+  `mark_digest_sent` 的重复 commit
+
+### 清理
+
+- 删除已完全废弃的截图补截链路（v2.0 起 `screenshot_pending` 标记不再产生）：
+  `scheduler._screenshot_retry_loop`、`scene2.retry_screenshots`、
+  `database` 的 `mark/clear/get_screenshot_pending_items`；推送前按需补截
+  （`_retry_screenshot_before_send`）不受影响
+
+### 验证（2026-08-29 部署后实测）
+
+- 新 sweep 首轮聚合日志：`基线237条 翻页0条 过期同步3条`（原为 4883 条全表拖回）
+- 表/请求：baseline 4884 → 2055；每 10 分钟 sweep 请求 3772 → ~2055 次；
+  每 30 分钟全量重翻 ~6226 页 → 0
+- 新进程 0 ERROR / 0 Traceback；pm2 重启后稳定 online
+
+---
+
 ## v2.0 (2026-08-28) — 截图时机重构：入库即截 → 推送时按需补截
 
 ### 重构

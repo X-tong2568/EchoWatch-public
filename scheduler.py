@@ -101,14 +101,9 @@ class Scheduler:
         tasks.append(asyncio.create_task(self._daily_digest_loop()))
         tasks.append(asyncio.create_task(self._immediate_notify_loop()))
         tasks.append(asyncio.create_task(self._archive_cleanup_loop()))
+        # 注：v2.0 起截图时机改为"推送时按需补截"（_retry_screenshot_before_send），
+        # 入库即截/待补截标记机制（screenshot_pending）已废弃，补截循环随之删除
         logger.info("通用调度任务已启动 (归档+日报+场景一即时通知+留档清理)")
-
-        # 截图补截循环：场景一/二/三/四任一启用即启动
-        # （入库暂缓的截图靠此循环分批补齐，否则邮件无原帖截图）
-        if (self.config.monitor.scene1_enabled or self.config.monitor.scene2_enabled
-                or self.config.monitor.scene3_enabled or self.config.monitor.scene4_enabled) and self.screenshotter:
-            tasks.append(asyncio.create_task(self._screenshot_retry_loop()))
-            logger.info(f"截图补截循环已启动: 每 {self.config.screenshot.retry_interval}s 执行")
 
         self._tasks = tasks
         try:
@@ -502,7 +497,7 @@ class Scheduler:
                     # 发送前兜底：本次待发互动对应的原帖若无截图，现场补截一次
                     if self.screenshotter:
                         await self._retry_screenshot_before_send(interactions)
-                    # 收集涉及的 UP主 名称（互动记录 up_uid=目标UP主）
+                    # 收集涉及的 UP主 名称（互动记录 up_uid=目标UP主，即星瞳）
                     up_names = sorted({
                         self._get_up_name(it.get("up_uid", ""))
                         for it in interactions
@@ -587,7 +582,7 @@ class Scheduler:
                     # 发送前兜底：本次待发互动对应的原帖若无截图，现场补截一次
                     if self.screenshotter:
                         await self._retry_screenshot_before_send(interactions)
-                    # 收集涉及的 UP主 名称（互动记录 up_uid=目标UP主）
+                    # 收集涉及的 UP主 名称（互动记录 up_uid=目标UP主，即星瞳）
                     up_names = sorted({
                         self._get_up_name(it.get("up_uid", ""))
                         for it in interactions
@@ -596,16 +591,6 @@ class Scheduler:
                     await self.notifier.send_scene4_batch(up_name)
             except Exception as e:
                 logger.error(f"场景四批量通知异常: {e}")
-            await asyncio.sleep(interval)
-
-    async def _screenshot_retry_loop(self):
-        """截图补截循环：定期补截入库时截图失败的动态（screenshot_pending=1）"""
-        interval = self.config.screenshot.retry_interval
-        while self.running:
-            try:
-                await self.scene2.retry_screenshots()
-            except Exception as e:
-                logger.error(f"截图补截循环异常: {e}")
             await asyncio.sleep(interval)
 
     async def _archive_cleanup_loop(self):

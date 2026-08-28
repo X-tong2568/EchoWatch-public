@@ -1,5 +1,5 @@
 # monitor_scene4.py
-"""EchoWatch 场景四：监测其他UP主动态/投稿/专栏评论区中目标UP主的评论/回复"""
+"""EchoWatch 场景四：监测其他UP主动态/投稿/专栏评论区中目标UP主（星瞳）的评论/回复"""
 
 import asyncio
 import random
@@ -24,17 +24,17 @@ SUB_SWEEP_REQUEST_INTERVAL = 0.8
 
 class Scene4Monitor:
     """
-    场景四：监测其他UP主动态/投稿/专栏的评论区，匹配目标UP主的评论/回复。
+    场景四：监测其他UP主动态/投稿/专栏的评论区，匹配目标UP主（星瞳）的评论/回复。
 
     与其他场景的区别：
-    - 匹配对象是配置的 target_uid（目标UP主），不是作品归属者（其他UP）
-    - 不检查 up_action.like（那是作品作者的点赞，不是目标UP主的互动）
-    - 不监测置顶/priority（其他UP的置顶与目标UP主回复无关）
+    - 匹配对象是配置的 target_uid（星瞳），不是作品归属者（其他UP）
+    - 不检查 up_action.like（那是作品作者的点赞，不是星瞳的互动）
+    - 不监测置顶/priority（其他UP的置顶与星瞳回复无关）
     - 无即时单发，互动由调度循环批量合并通知（同场景二/三）
 
     两阶段轮询（同场景三）：
     - 阶段A：拉取其他UP空间动态列表 → 新帖子入库（source="scene4"）
-    - 阶段B：轮询监测队列中各帖子的评论区，匹配目标UP主的评论/回复
+    - 阶段B：轮询监测队列中各帖子的评论区，匹配星瞳的评论/回复
 
     分级：L1（0~24h）→ L2（24~120h）→ L0（归档），与场景一相同阈值。
     子评论：rcount 基线节流（有评论数量字段 → 场景2式节流）。
@@ -46,7 +46,7 @@ class Scene4Monitor:
         self.client = client
         self.config = config
         self.screenshotter = screenshotter  # 推送前按需补截用（v2.0 起）
-        self.target_uid = config.scene4.target_uid  # 目标UP主UID
+        self.target_uid = config.scene4.target_uid  # 目标UP主UID（星瞳）
         self._polling_l1 = False
         self._polling_l2 = False
         self._disabled_until: dict = {}  # item_id → 跳过轮询截止时间（评论已关闭的帖子）
@@ -75,9 +75,6 @@ class Scene4Monitor:
             return
 
         new_count = 0
-        # 混合截图策略：本轮已现场截图的张数，超过单批上限后暂缓，交补截循环分批补
-        shot_taken = 0
-        max_shot = self.config.screenshot.max_per_batch
         for dyn in dynamics:
             dyn_id = dyn.get("dynamic_id", "")
             comment_oid = dyn.get("comment_oid", "")
@@ -106,35 +103,8 @@ class Scene4Monitor:
             )
             if inserted:
                 new_count += 1
-                # 老帖（发布超120h，入库即归档L0）不截图也不标记待补截：
-                # 风控降级拉入的历史投稿不会进轮询队列，原帖截图无邮件用途，
-                # 无谓的浏览器页面加载会烧掉大量机场流量（2026-08-28 流量事故）。
-                # pub_ts 可能是字符串（B站API），先转int，异常按0处理=不跳过
-                try:
-                    pub_ts_int = int(float(pub_ts))
-                except (ValueError, TypeError):
-                    pub_ts_int = 0
-                if pub_ts_int > 0 and (
-                    (datetime.now() - datetime.fromtimestamp(pub_ts_int)).total_seconds()
-                    > self.config.thresholds.level2_hours * 3600
-                ):
-                    continue
-                # 混合截图策略（同场景一）：小批量立即截，超限暂缓标记待补截；
-                # 截图失败也占本轮额度（防慢，失败留待补截循环重试）
-                if self.screenshotter:
-                    if shot_taken < max_shot:
-                        shot_taken += 1
-                        try:
-                            shot_path = await self.screenshotter.take_dynamic_screenshot(dyn_id)
-                            if shot_path is None:
-                                await self.db.mark_screenshot_pending(dyn_id)
-                                logger.warning(f"入库截图未成功，已标记待补截 ({dyn_id})")
-                        except Exception as e:
-                            await self.db.mark_screenshot_pending(dyn_id)
-                            logger.warning(f"入库截图失败，已标记待补截 ({dyn_id}): {e}")
-                    else:
-                        await self.db.mark_screenshot_pending(dyn_id)
-                        logger.debug(f"本轮截图已达上限 ({max_shot})，暂缓待补截: {dyn_id}")
+                # v2.0：不再入库即截图——截图改为推送时按需补截（有目标互动的帖才截），
+                # 发现层绝大多数动态不会被推送，白截浪费机场流量（2026-08-28 流量事故）
             else:
                 # 已存在但oid可能不对，尝试修正（动态ID → 真实aid）
                 await self.db.update_comment_oid(dyn_id, comment_oid)
@@ -326,7 +296,7 @@ class Scene4Monitor:
 
     async def _process_comment(self, raw: dict, oid: int, comment_type, item_id: str) -> bool:
         """
-        处理单条一级评论：仅匹配 target_uid（目标UP主）自己的评论。
+        处理单条一级评论：仅匹配 target_uid（星瞳）自己的评论。
         不检查 up_action.like（那是作品作者的点赞，语义同场景3）。
 
         Args:
@@ -336,7 +306,7 @@ class Scene4Monitor:
             item_id: 所属帖子ID
 
         Returns:
-            True 表示目标UP主在此评论处有互动（用于统计）
+            True 表示星瞳在此评论处有互动（用于统计）
         """
         parsed = parse_comment(raw)
         rpid = parsed["rpid"]
@@ -346,7 +316,7 @@ class Scene4Monitor:
 
         target_found = False
 
-        # 匹配目标UP主的评论
+        # 匹配目标UP主（星瞳）的评论
         if mid == self.target_uid:
             target_found = True
             await self.db.insert_interaction({
@@ -399,7 +369,7 @@ class Scene4Monitor:
                                      root_context: dict, replies_count: int = 0,
                                      force_full: bool = False) -> bool:
         """
-        拉取子评论，匹配目标UP主的回复（尾部窗口翻页，同场景一 v1.6.0）。
+        拉取子评论，匹配星瞳的回复（尾部窗口翻页，同场景一 v1.6.0）。
 
         翻页策略（楼中楼按时间升序，新回复总在尾部）：
         - 日常触发：窗口 = [基线位置-2页, 最新末页]，只翻新增部分
@@ -413,7 +383,7 @@ class Scene4Monitor:
             force_full: 强制全量扫描（sweep 兜底扫查用）
 
         Returns:
-            True 表示目标UP主在此处有互动
+            True 表示星瞳在此处有互动
         """
         SUB_PAGE = SUB_COMMENT_PAGE_SIZE
 
@@ -433,7 +403,8 @@ class Scene4Monitor:
                 return True
             # 新回复在尾部；粉丝删除评论会使位置前移，多翻2页兜底
             start_page = max(1, prev // SUB_PAGE - 2)
-            end_page = (total + SUB_PAGE - 1) // SUB_PAGE
+            # MAX_SUB_PAGES 上限：rcount 暴涨/接口返回虚高值时窗口页数有界（2026-08-29 审计）
+            end_page = min(MAX_SUB_PAGES, (total + SUB_PAGE - 1) // SUB_PAGE)
 
         all_subs = []  # 收集窗口内所有子评论
         completed = False  # 是否翻完预期窗口（未翻完不打基线，下轮重试）
@@ -490,7 +461,7 @@ class Scene4Monitor:
         target_found = False
         for raw in all_subs:
             parsed = parse_sub_comment(raw)
-            # 仅匹配目标UP主的回复
+            # 仅匹配目标UP主（星瞳）的回复
             if parsed["mid"] != self.target_uid:
                 continue
 
@@ -535,34 +506,29 @@ class Scene4Monitor:
         子评论基线兜底扫查：不依赖主评论列表可见性。
 
         直接对 sub_comment_baseline 表里 scene4 的根评论调子评论 API 查权威 count，
-        count 变大或基线过期时触发完整翻页检测（防静默漏检）。
+        count 变大时触发增量翻页检测（防静默漏检）。
+
+        2026-08-29 审计改造（风暴镇压，同场景一）：
+        - 已归档（L0）基线在 SQL 层过滤（get_all_sub_baselines JOIN）
+        - count 无变化但基线过期（>sub_sweep_max_age）时仅同步权威 count，
+          零翻页（原实现此时照样 force_full 全量重翻，是 -412 风暴主因）
         无主列表上下文时 root_context 传 None，parent 显示留空。
         """
-        rows = await self.db.get_all_sub_baselines()
+        other_uids = {other.uid for other in self.config.scene4.other_up_list}
+        rows = await self.db.get_all_sub_baselines(source="scene4", up_uids=list(other_uids))
         if not rows:
             return
 
-        # 其他UP UID → 配置映射（仅做 scene4 项的过滤）
-        other_uids = {other.uid for other in self.config.scene4.other_up_list}
-
-        checked = 0
+        checked = 0   # 实际翻页检测条数
+        synced = 0    # 仅同步权威 count 的条数（零翻页）
         for row in rows:
-            item = await self.db.get_item(row["item_id"])
-            if not item:
-                continue
-            # 只处理 scene4 的基线（其他场景的由各自 sweep 负责）
-            if item.get("source") != "scene4":
-                continue
-            if item.get("up_uid") not in other_uids:
-                continue
-
             try:
-                oid = int(item.get("comment_oid") or 0)
+                oid = int(row.get("comment_oid") or 0)
             except (ValueError, TypeError):
                 continue
             if not oid:
                 continue
-            comment_type = self.client.get_comment_type(item["item_type"])
+            comment_type = self.client.get_comment_type(row.get("item_type", ""))
             root_rpid = int(row["root_rpid"])
             # 查第1页拿权威 count（每基线1次请求，节流）
             try:
@@ -584,27 +550,26 @@ class Scene4Monitor:
                 gap_sec = (datetime.now() - last_dt).total_seconds()
             except (ValueError, TypeError):
                 pass
-            # 触发条件：count 变大 且 距上次翻 ≥ 2min；或基线过期强制翻
-            need_check = (count > row["last_rcount"] and gap_sec >= SUB_COMMENT_MIN_INTERVAL) \
-                or gap_sec >= self.config.intervals.sub_sweep_max_age
-            if not need_check:
-                continue
-            checked += 1
-            logger.info(
-                f"场景四子评论基线扫查触发: item={row['item_id']} root={root_rpid} "
-                f"count={count} 基线={row['last_rcount']} 距今={int(gap_sec)}s"
-            )
-            await self._process_sub_comments(
-                oid, comment_type, root_rpid, item["item_id"],
-                root_context=None, replies_count=count,
-                # 强制全量扫查：防"收集不全却误标基线"的截断漏检
-                force_full=True,
-            )
+            if count > row["last_rcount"] and gap_sec >= SUB_COMMENT_MIN_INTERVAL:
+                # 有新增回复 → 增量窗口翻页（不再全量重翻）
+                checked += 1
+                logger.info(
+                    f"场景四子评论基线扫查触发: item={row['item_id']} root={root_rpid} "
+                    f"count={count} 基线={row['last_rcount']} 距今={int(gap_sec)}s"
+                )
+                await self._process_sub_comments(
+                    oid, comment_type, root_rpid, row["item_id"],
+                    root_context=None, replies_count=count,
+                )
+            elif gap_sec >= self.config.intervals.sub_sweep_max_age:
+                # 基线过期但 count 未变：权威 count 同步基线，零翻页
+                synced += 1
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                await self.db.upsert_sub_baseline(row["item_id"], root_rpid, count, now_str)
 
-        if checked > 0:
-            logger.info(f"场景四子评论基线扫查: 触发 {checked} 条")
-        else:
-            logger.debug(f"场景四子评论基线扫查: 共扫描 {len(rows)} 条基线，无触发")
+        logger.info(
+            f"场景四子评论基线扫查: 基线{len(rows)}条 翻页{checked}条 过期同步{synced}条"
+        )
 
 
 # ============================================================

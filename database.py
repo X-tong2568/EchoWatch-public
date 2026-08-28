@@ -175,10 +175,14 @@ class Database:
             return False
 
     def _backup_and_rebuild(self):
-        """备份损坏的数据库并删除原文件"""
+        """备份损坏的数据库并删除原文件（WAL 模式的 -wal/-shm 一并删除，防污染新建库）"""
         backup_path = self.db_path + f".backup_{datetime.now().strftime('%Y%m%d%H%M%S')}"
         shutil.copy2(self.db_path, backup_path)
         os.remove(self.db_path)
+        for suffix in ("-wal", "-shm"):
+            side_file = self.db_path + suffix
+            if os.path.exists(side_file):
+                os.remove(side_file)
         logger.warning(f"数据库已损坏，已备份到 {backup_path} 并重建")
         logger.warning("注意：历史数据已丢失，监测将从头开始")
 
@@ -269,7 +273,7 @@ class Database:
             # 初始级别按发布时间年龄计算，防止"旧帖入库即 L1 被立即轮询"：
             # 发现层（尤其空间动态API风控时的视频列表降级）会把历史投稿整批拉入，
             # 若 L1 硬编码并立即轮询，会把老帖评论区里的历史评论当新互动推送
-            # （2026-08-26 事故：两年前联合投稿视频下的历史评论被当新互动推送）。
+            # （2026-08-26 事故：两年前联合投稿视频下的星瞳历史评论被当新互动推送）。
             # 阈值与 config.thresholds 对齐（level1_hours=24 / level2_hours=120）。
             if is_priority:
                 init_level = 1  # 置顶/priority 必须 L1，不进归档
@@ -320,36 +324,32 @@ class Database:
         rows = await self._conn.execute_fetchall(sql, (source,))
         return [dict(r) for r in rows]
 
-    async def mark_screenshot_pending(self, item_id: str):
-        """标记某动态截图失败，等待后续补截（screenshot_pending=1）"""
-        await self._conn.execute(
-            "UPDATE monitored_items SET screenshot_pending = 1 WHERE item_id = ?",
-            (item_id,),
+    async def claim_notified_immediate(self, interaction_id: int) -> bool:
+        """
+        原子认领一条即时通知（发送前调用，防双通道重复发送 2026-08-29）。
+
+        30s 即时通知循环 与 priority 内联发送都可能取到同一条未通知互动，
+        双方"发送成功后才标记"存在竞态窗口（P0-5）。此方法先抢行：
+        UPDATE 带 notified_immediate=0 条件，抢到置 1，另一个通道抢不到即放弃。
+
+        Returns:
+            True=抢到（发送权在手）；False=已被其他通道认领/已发送
+        """
+        cursor = await self._conn.execute(
+            "UPDATE interactions SET notified_immediate = 1 "
+            "WHERE id = ? AND notified_immediate = 0",
+            (interaction_id,)
         )
         await self._conn.commit()
+        return cursor.rowcount > 0
 
-    async def clear_screenshot_pending(self, item_id: str):
-        """清除某动态的待补截标记（补截成功后调用）"""
+    async def release_notified_immediate(self, interaction_id: int):
+        """释放认领失败：发送失败时回滚标记，下轮重试（保持"发送成功才标记"语义）"""
         await self._conn.execute(
-            "UPDATE monitored_items SET screenshot_pending = 0 WHERE item_id = ?",
-            (item_id,),
+            "UPDATE interactions SET notified_immediate = 0 WHERE id = ?",
+            (interaction_id,)
         )
         await self._conn.commit()
-
-    async def get_screenshot_pending_items(self, limit: int = 5) -> list[str]:
-        """
-        获取待补截动态的 item_id 列表（按发现时间从新到旧，最多 limit 条）。
-
-        不限 monitor_level：场景三历史切片归档（L0）后仍需补齐截图
-        （首次入库暂缓截图，由补截循环分批补齐，邮件上下文用）。
-        """
-        sql = """
-        SELECT item_id FROM monitored_items
-        WHERE screenshot_pending = 1
-        ORDER BY first_seen_at DESC LIMIT ?
-        """
-        rows = await self._conn.execute_fetchall(sql, (limit,))
-        return [row["item_id"] for row in rows]
 
     async def get_priority_items(self) -> list[dict]:
         """获取所有优先监测项（is_priority=1 且 level > 0，新内容优先）"""
@@ -435,6 +435,13 @@ class Database:
             "UPDATE monitored_items SET monitor_level = ? WHERE item_id = ?",
             (level, item_id)
         )
+        if level == 0:
+            # 归档级联清理基线：L0 不可逆（_check_level_transition 对 L0 直接 return 0），
+            # 归档后子评论基线无维护意义，删除防表膨胀（2026-08-29 审计）
+            await self._conn.execute(
+                "DELETE FROM sub_comment_baseline WHERE item_id = ?",
+                (item_id,)
+            )
         await self._conn.commit()
         logger.debug(f"监测级别变更: {item_id} -> Level {level}")
 
@@ -480,32 +487,61 @@ class Database:
         )
         return row[0]["comment_oid"] or "" if row else ""
 
-    async def get_item_by_comment_oid(self, comment_oid: str) -> Optional[dict]:
+    async def get_item_by_comment_oid(self, comment_oid: str,
+                                       source: str = None, up_uid: str = None) -> Optional[dict]:
         """
-        按 comment_oid 查已有监测项（跨场景去重用）。
+        按 comment_oid 查已有监测项（去重用）。
 
-        同一评论区（同一视频 aid / 同一动态）只应被一个场景监测，
-        scene2/scene3 发现前先查此方法，占用则跳过。
+        不加参数：跨场景去重（同一评论区只应被一个场景监测，
+        scene2/scene3 发现前先查此方法，占用则跳过）。
+        加 source/up_uid 参数：场景内部去重（如 scene1 降级路径防 av 前缀与
+        动态ID 双份入库，2026-08-29 审计）。
+
+        Args:
+            comment_oid: 评论区 oid
+            source: 限定场景（None=不限）
+            up_uid: 限定 UP 主（None=不限）
         """
-        row = await self._conn.execute_fetchall(
-            "SELECT * FROM monitored_items WHERE comment_oid = ? LIMIT 1",
-            (comment_oid,)
-        )
+        sql = "SELECT * FROM monitored_items WHERE comment_oid = ?"
+        params: list = [comment_oid]
+        if source:
+            sql += " AND source = ?"
+            params.append(source)
+        if up_uid:
+            sql += " AND up_uid = ?"
+            params.append(up_uid)
+        sql += " LIMIT 1"
+        row = await self._conn.execute_fetchall(sql, tuple(params))
         return dict(row[0]) if row else None
 
     async def archive_stale(self, hours_threshold: int) -> int:
         """归档超时的监测项（Level > 0 设为 Level 0），返回归档数量"""
         cutoff = (datetime.now() - timedelta(hours=hours_threshold)).strftime("%Y-%m-%d %H:%M:%S")
-        # 仅归档非优先项
+        # 仅归档非优先项；先查出受影响 item（供基线级联清理用）
+        rows = await self._conn.execute_fetchall(
+            "SELECT item_id FROM monitored_items "
+            "WHERE monitor_level > 0 AND is_priority = 0 AND first_seen_at < ?",
+            (cutoff,)
+        )
+        item_ids = [r["item_id"] for r in rows]
+        if not item_ids:
+            return 0
         cursor = await self._conn.execute(
             "UPDATE monitored_items SET monitor_level = 0 "
             "WHERE monitor_level > 0 AND is_priority = 0 AND first_seen_at < ?",
             (cutoff,)
         )
+        # 归档即不再轮询（L0 不可逆）：级联删除其子评论基线，
+        # 防 sub_comment_baseline 随作品轮换单调膨胀（2026-08-29 审计）
+        placeholders = ",".join("?" * len(item_ids))
+        await self._conn.execute(
+            f"DELETE FROM sub_comment_baseline WHERE item_id IN ({placeholders})",
+            item_ids
+        )
         await self._conn.commit()
         count = cursor.rowcount
         if count > 0:
-            logger.info(f"归档了 {count} 条超时监测项")
+            logger.info(f"归档了 {count} 条超时监测项（本级联清理其基线）")
         return count
 
     # ----------------------------------------------------------
@@ -558,10 +594,42 @@ class Database:
     # 子评论检测基线（rcount 节流）
     # ----------------------------------------------------------
 
-    async def get_all_sub_baselines(self) -> list[dict]:
-        """取全部子评论检测基线（兜底扫查用，不按 item 过滤）"""
-        sql = "SELECT * FROM sub_comment_baseline"
-        rows = await self._conn.execute_fetchall(sql)
+    async def get_all_sub_baselines(self, source: str = None,
+                                     up_uids: list = None,
+                                     active_only: bool = True) -> list[dict]:
+        """
+        取子评论检测基线（兜底扫查用），默认过滤已归档项。
+
+        2026-08-29 审计改造：
+        - JOIN monitored_items 在 SQL 层过滤 monitor_level=0 的基线并支持
+          场景/UP 过滤，替代旧的"全表返回+逐个 get_item 判断"
+          （旧实现每轮 4k+ 行全拖回，DB 开销一分不减且表随归档单调膨胀）
+        - SELECT 同时带出 item 字段（comment_oid/item_type/source/up_uid），
+          调用方无需再逐条 get_item 查询
+
+        Args:
+            source: 只返回该场景的基线（None=不限）
+            up_uids: 只返回这些 UP 的基线（None=不限）
+            active_only: True=过滤 monitor_level=0 的已归档项（归档即停止监测）
+        """
+        sql = """
+        SELECT b.item_id, b.root_rpid, b.last_rcount, b.last_check_ts,
+               m.up_uid, m.comment_oid, m.item_type, m.source, m.monitor_level
+        FROM sub_comment_baseline b
+        JOIN monitored_items m ON m.item_id = b.item_id
+        WHERE 1=1
+        """
+        params: list = []
+        if active_only:
+            sql += " AND m.monitor_level > 0"
+        if source:
+            sql += " AND m.source = ?"
+            params.append(source)
+        if up_uids:
+            placeholders = ",".join("?" * len(up_uids))
+            sql += f" AND m.up_uid IN ({placeholders})"
+            params.extend(up_uids)
+        rows = await self._conn.execute_fetchall(sql, tuple(params))
         return [dict(r) for r in rows]
 
     async def get_item(self, item_id: str) -> Optional[dict]:
@@ -644,16 +712,27 @@ class Database:
             "INSERT OR REPLACE INTO digest_state (date) VALUES (?)", (date_str,)
         )
         await self._conn.commit()
-        await self._conn.commit()
 
-    async def get_unnotified_immediate(self, scene: str = None) -> list[dict]:
-        """获取未即时通知的互动，可选按场景过滤（scene1 逐条发，scene2 批量发）"""
+    async def get_unnotified_immediate(self, scene: str = None, limit: int = 200,
+                                       max_age_hours: int = 48) -> list[dict]:
+        """
+        获取未即时通知的互动，可选按场景过滤（scene1 逐条发，scene2 批量发）。
+
+        2026-08-29 防护（P2-3/P2-4）：
+        - limit=200：积压时不再一次全取逐条发信（原实现无上限，积压会撑爆一轮）
+        - max_age_hours=48：超过 48h 的旧互动不再即时推送（只进日报，日报走
+          get_unnotified_digest 全量不受此限）。防长时间关闭即时通知后重开
+          触发历史补发风暴；不影响正常即时（新互动正常进入）
+        """
+        cutoff = (datetime.now() - timedelta(hours=max_age_hours)).strftime("%Y-%m-%d %H:%M:%S")
         if scene:
-            sql = "SELECT * FROM interactions WHERE notified_immediate = 0 AND scene = ?"
-            rows = await self._conn.execute_fetchall(sql, (scene,))
+            sql = ("SELECT * FROM interactions WHERE notified_immediate = 0 AND scene = ? "
+                   "AND discovered_at >= ? ORDER BY id LIMIT ?")
+            rows = await self._conn.execute_fetchall(sql, (scene, cutoff, limit))
         else:
-            sql = "SELECT * FROM interactions WHERE notified_immediate = 0"
-            rows = await self._conn.execute_fetchall(sql)
+            sql = ("SELECT * FROM interactions WHERE notified_immediate = 0 "
+                   "AND discovered_at >= ? ORDER BY id LIMIT ?")
+            rows = await self._conn.execute_fetchall(sql, (cutoff, limit))
         return [dict(r) for r in rows]
 
     async def get_unnotified_digest(self, up_uid: str = None) -> list[dict]:
