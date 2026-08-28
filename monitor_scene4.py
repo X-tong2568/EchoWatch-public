@@ -403,8 +403,13 @@ class Scene4Monitor:
                 return True
             # 新回复在尾部；粉丝删除评论会使位置前移，多翻2页兜底
             start_page = max(1, prev // SUB_PAGE - 2)
-            # MAX_SUB_PAGES 上限：rcount 暴涨/接口返回虚高值时窗口页数有界（2026-08-29 审计）
-            end_page = min(MAX_SUB_PAGES, (total + SUB_PAGE - 1) // SUB_PAGE)
+            # 真实末页不截断（窗口宽度才受 MAX_SUB_PAGES 限制，与 total 绝对值无关）
+            end_page = (total + SUB_PAGE - 1) // SUB_PAGE
+            # 窗口宽度上限（2026-08-29 三方核查修正）：限制的是宽度而非 end_page——
+            # 子评论按时间升序、新回复在高页码，若回退 start_page=1 会翻最老条目且
+            # 虚标基线导致稳定漏检；正确做法是砍头部（老数据）保尾部（新增区）
+            if end_page - start_page + 1 > MAX_SUB_PAGES:
+                start_page = end_page - MAX_SUB_PAGES + 1
 
         all_subs = []  # 收集窗口内所有子评论
         completed = False  # 是否翻完预期窗口（未翻完不打基线，下轮重试）

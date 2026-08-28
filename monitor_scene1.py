@@ -442,7 +442,8 @@ class Scene1Monitor:
                                      root_rpid, item_id: str, up: UpConfig,
                                      root_context: dict, replies_count: int = 0,
                                      check_up_liked: bool = True,
-                                     force_full: bool = False):
+                                     force_full: bool = False,
+                                     scene: str = "scene1"):
         """
         拉取并处理子评论，匹配 UP主 的回复（尾部窗口翻页，v1.6.0）。
 
@@ -470,6 +471,10 @@ class Scene1Monitor:
                 不是UP主点赞 → 场景2 item 必须传 False（与 scene2 已删的
                 up_liked 功能一致），否则会把粉丝点赞误报成UP主互动。
             force_full: 强制全量扫描（sweep 兜底扫查用，防截断误标基线）。
+            scene: 互动记录归属场景。默认 "scene1"；scene1 sweep 会代查
+                scene2 话题帖基线（scene2 无独立 sweep 循环，up_uid 同为
+                目标 UP，2026-08-29 三方核查发现），调用方应按基线所在
+                item 的真实 source 传入，保证邮件场景标签/通知通道正确。
         """
         SUB_PAGE = SUB_COMMENT_PAGE_SIZE
 
@@ -489,8 +494,13 @@ class Scene1Monitor:
                 return True
             # 新回复在尾部；粉丝删除评论会使位置前移，多翻2页兜底
             start_page = max(1, prev // SUB_PAGE - 2)
-            # MAX_SUB_PAGES 上限：rcount 暴涨/接口返回虚高值时窗口页数有界（2026-08-29 审计）
-            end_page = min(MAX_SUB_PAGES, (total + SUB_PAGE - 1) // SUB_PAGE)
+            # 真实末页不截断（窗口宽度才受 MAX_SUB_PAGES 限制，与 total 绝对值无关）
+            end_page = (total + SUB_PAGE - 1) // SUB_PAGE
+            # 窗口宽度上限（2026-08-29 三方核查修正）：限制的是宽度而非 end_page——
+            # 子评论按时间升序、新回复在高页码，若回退 start_page=1 会翻最老条目且
+            # 虚标基线导致稳定漏检；正确做法是砍头部（老数据）保尾部（新增区）
+            if end_page - start_page + 1 > MAX_SUB_PAGES:
+                start_page = end_page - MAX_SUB_PAGES + 1
 
         all_subs = []  # 收集窗口内所有子评论
         completed = False  # 是否翻完预期窗口（未翻完不打基线，下轮重试）
@@ -575,7 +585,7 @@ class Scene1Monitor:
                     "content": parsed["content"],
                     "rich_content": parsed.get("rich_content", ""),
                     "up_liked": False,
-                    "scene": "scene1",
+                    "scene": scene,
                 })
 
             # 检查 2：子评论被 UP 觉得很赞（不重复记录 UP主 自己的回复）
@@ -591,7 +601,7 @@ class Scene1Monitor:
                     "content": parsed["content"],
                     "rich_content": parsed.get("rich_content", ""),
                     "up_liked": True,
-                    "scene": "scene1",
+                    "scene": scene,
                 })
 
         return True  # 成功拿到子评论数据
@@ -612,6 +622,9 @@ class Scene1Monitor:
           基线（last_rcount + 时间戳），零翻页——原实现此时照样 force_full
           全量重翻，是 -412 请求风暴的主因（实测单条 rcount 均 ≤10 占比 91%）
 
+        约定：scene2 没有独立的 sweep 循环（其基线由本 sweep 代查——
+        scene2 话题帖 item 的 up_uid 与 up_list 同值，JOIN 用 up_uids
+        过滤天然混入），互动归属按 item 实际 source 传入（scene 参数）。
         无主列表上下文时 root_context 传 None，parent 显示留空。
         """
         up_uids = [u.uid for u in self.config.up_list]
@@ -661,6 +674,9 @@ class Scene1Monitor:
                     root_context=None, replies_count=count,
                     # scene2 含粉丝帖：up_action.like 是发帖粉丝的赞，不检测"觉得很赞"
                     check_up_liked=(row.get("source") != "scene2"),
+                    # 归属按 item 真实来源：本 sweep 会代查 scene2 话题帖基线
+                    # （scene2 无独立 sweep，up_uid 同目标 UP），勿硬编码 scene1
+                    scene=row.get("source") or "scene1",
                 )
             elif gap_sec >= self.config.intervals.sub_sweep_max_age:
                 # 基线过期但 count 未变：权威 count 同步基线，零翻页
