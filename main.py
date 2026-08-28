@@ -46,7 +46,10 @@ async def main():
     # ----------------------------------------------------------
     # 4. 初始化 B站 API 客户端（零Cookie，纯公开API+WBI签名）
     # ----------------------------------------------------------
-    client = BiliClient(breaker_cooldown_seconds=config.breaker.ratelimit_cooldown_seconds)
+    client = BiliClient(
+        breaker_cooldown_seconds=config.breaker.ratelimit_cooldown_seconds,
+        comment_direct=config.comment.direct,
+    )
 
     # ----------------------------------------------------------
     # 5. 验证 UP主 信息（场景三：自动获取切片员昵称，config 只需填 UID）

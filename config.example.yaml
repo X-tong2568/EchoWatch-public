@@ -63,6 +63,12 @@ retry:
 breaker:
   ratelimit_cooldown_seconds: 1800   # 冷却时长（秒），默认1800=30分钟
 
+# --- 评论接口通道（2026-08-28 新增）---
+# space feed 被风控时评论接口仍正常应答（B站按端点分治），
+# direct: true 让评论/子评论扫描直连（不再走代理），主功能不受机场/代理故障连累
+comment:
+  direct: false   # true=评论扫描直连；观察期验证无 -412 后再长开
+
 # --- 邮件配置 ---
 email:
   smtp_server: "smtp.qq.com"

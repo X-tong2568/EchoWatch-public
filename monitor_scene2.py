@@ -108,17 +108,8 @@ class Scene2Monitor:
                     )
                     if inserted:
                         new_count += 1
-                        # 入库时截取原帖截图（异步，失败不阻塞发现流程）
-                        if self.screenshotter:
-                            try:
-                                shot_path = await self.screenshotter.take_dynamic_screenshot(dyn_id)
-                                if shot_path is None:
-                                    # 截图失败（风控/登录遮罩/浏览器异常）：标记待补截，由补截循环重试
-                                    await self.db.mark_screenshot_pending(dyn_id)
-                                    logger.warning(f"入库截图未成功，已标记待补截 ({dyn_id})")
-                            except Exception as e:
-                                await self.db.mark_screenshot_pending(dyn_id)
-                                logger.warning(f"入库截图失败，已标记待补截 ({dyn_id}): {e}")
+                        # v2.0：不再入库即截图——截图改为推送时按需补截（有目标互动的帖才截），
+                        # 发现层绝大多数动态不会被推送，白截浪费机场流量（2026-08-28 流量事故）
                     else:
                         # 遇到已入库的帖子 → 停止翻页（说明追上了历史）
                         # 注意：不能用 break 中断本页遍历 —— 若某条动态曾被 continue 跳过

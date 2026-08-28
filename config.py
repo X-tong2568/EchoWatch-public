@@ -97,6 +97,12 @@ class BreakerConfig:
 
 
 @dataclass
+class CommentConfig:
+    """评论接口网络通道配置（2026-08-28 新增）"""
+    direct: bool = False   # True=评论/子评论扫描直连（不代理）——主功能不再受机场挂连累；观察期验证无风控后保留
+
+
+@dataclass
 class EmailConfig:
     """邮件配置"""
     smtp_server: str = "smtp.qq.com"
@@ -124,11 +130,11 @@ class DatabaseConfig:
 
 @dataclass
 class ScreenshotConfig:
-    """截图配置（场景二原帖截图嵌入邮件）"""
+    """截图配置（v2.0 起截图仅在推送前按需补截，入库不再截图）"""
     enabled: bool = True           # 是否启用截图模式
-    max_per_batch: int = 5         # 单批最多截几张（防止大量场景二时耗时过长）
+    max_per_batch: int = 5         # v2.0 起仅兼容保留（补截循环限额），已无入库截图
     save_dir: str = "sent_emails"  # 截图保存目录
-    retry_interval: int = 600      # 截图失败补截循环间隔（秒），失败动态自动重试补截
+    retry_interval: int = 600      # 补截循环间隔（秒），v2.0 起无入库标记将自然空闲
     archive_keep_days: int = 30    # 留档截图保留天数，超过自动清理（邮件HTML已内嵌base64，PNG为冗余）
 
 
@@ -167,6 +173,7 @@ class Config:
         self.thresholds = ThresholdsConfig(**raw.get("thresholds", {}))
         self.retry = RetryConfig(**raw.get("retry", {}))
         self.breaker = BreakerConfig(**raw.get("breaker", {}))
+        self.comment = CommentConfig(**raw.get("comment", {}))
         self.email = EmailConfig(**raw.get("email", {}))
         self.notify = NotifyConfig(**raw.get("notify", {}))
         self.database = DatabaseConfig(**raw.get("database", {}))

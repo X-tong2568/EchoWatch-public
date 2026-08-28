@@ -334,15 +334,21 @@ class Scheduler:
             try:
                 now = datetime.now()
                 target_hour = self.config.notify.daily_digest_hour
+                today_str = now.strftime("%Y-%m-%d")
 
-                # 凌晨重置标记
+                # 凌晨重置内存标记（DB 状态按日期自然重置）
                 if now.hour == 0:
                     self._digest_sent_today = False
 
-                # 在目标小时发送（且今天没发过）
+                # 在目标小时发送（且今天没发过）。
+                # DB 持久化防重：重启后内存标记归零，若 DB 记录今日已发则不重发
+                # （2026-08-28 事故：同小时多次重启导致日报重复补发）
                 if now.hour == target_hour and not self._digest_sent_today:
-                    for up in self.config.up_list:
-                        await self.notifier.send_daily_digest(up.name, up.uid)
+                    sent = await self.db.is_digest_sent_today(today_str)
+                    if not sent:
+                        for up in self.config.up_list:
+                            await self.notifier.send_daily_digest(up.name, up.uid)
+                        await self.db.mark_digest_sent(today_str)
                     self._digest_sent_today = True
             except Exception as e:
                 logger.error(f"日报发送异常: {e}")
@@ -627,15 +633,20 @@ class Scheduler:
                 logger.error(f"留档清理异常: {e}")
             await asyncio.sleep(interval)
 
-    async def _retry_screenshot_before_send(self, interactions: list):
+    async def _retry_screenshot_before_send(self, interactions: list, max_shots: int = 3):
         """
-        发送前兜底：待发互动的原帖若无截图文件则现场补截一次。
+        发送前按需补截：待发互动的原帖若无截图文件则现场补截，最多 max_shots 张。
 
-        截图失败（风控/遮罩）通常是间歇性的，发送时离入库已过一段时间，
-        补截成功率更高。失败不影响邮件发送（自动降级文本渲染）。
+        v2.0 起为唯一截图时机（入库不再截图）——只有真产生目标互动的帖子才会被截，
+        截图每次最多 3 张：超限/失败/超时直接空着发送（邮件自动降级文本渲染），
+        不阻塞邮件不形成积压，机场流量随推送按需付费。
         """
         save_dir = Path(self.config.screenshot.save_dir)
+        shots = 0
         for it in interactions:
+            if shots >= max_shots:
+                logger.info(f"发送前补截已达上限 ({max_shots} 张)，其余互动邮件内空着原帖图")
+                break
             item_id = it.get("item_id", "")
             if not item_id:
                 continue
@@ -646,6 +657,7 @@ class Scheduler:
                 logger.info(f"发送前补截成功: {item_id}")
             except Exception as e:
                 logger.warning(f"发送前补截失败 ({item_id}): {e}")
+            shots += 1
 
     # ==========================================================
     # 辅助方法

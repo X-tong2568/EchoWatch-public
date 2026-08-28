@@ -79,6 +79,15 @@ CREATE TABLE IF NOT EXISTS sub_comment_baseline (
 )
 """
 
+# 日报发送状态表：每天一行（日期主键）。
+# 防"重启导致 _digest_sent_today 内存标记归零 → 同小时内补发日报"（2026-08-28 事故）
+CREATE_DIGEST_STATE = """
+CREATE TABLE IF NOT EXISTS digest_state (
+    date        TEXT PRIMARY KEY,
+    sent_at     TEXT DEFAULT (datetime('now', 'localtime'))
+)
+"""
+
 CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_items_level ON monitored_items(monitor_level, source)",
     "CREATE INDEX IF NOT EXISTS idx_items_upuid ON monitored_items(up_uid)",
@@ -127,6 +136,7 @@ class Database:
         await self._conn.execute(CREATE_INTERACTIONS)
         await self._conn.execute(CREATE_TOPIC_OFFSET)
         await self._conn.execute(CREATE_SUB_COMMENT_BASELINE)
+        await self._conn.execute(CREATE_DIGEST_STATE)
 
         # 建索引
         for idx_sql in CREATE_INDEXES:
@@ -615,6 +625,25 @@ class Database:
             f"UPDATE interactions SET notified_digest = 1 WHERE id IN ({placeholders})",
             ids
         )
+        await self._conn.commit()
+
+    # ----------------------------------------------------------
+    # 日报发送状态（防重启重复补发）
+    # ----------------------------------------------------------
+
+    async def is_digest_sent_today(self, date_str: str) -> bool:
+        """今日日报是否已发送（用于重启后恢复判定，防同小时补发）"""
+        row = await self._conn.execute_fetchall(
+            "SELECT 1 FROM digest_state WHERE date = ?", (date_str,)
+        )
+        return bool(row)
+
+    async def mark_digest_sent(self, date_str: str):
+        """记录今日日报已发送"""
+        await self._conn.execute(
+            "INSERT OR REPLACE INTO digest_state (date) VALUES (?)", (date_str,)
+        )
+        await self._conn.commit()
         await self._conn.commit()
 
     async def get_unnotified_immediate(self, scene: str = None) -> list[dict]:

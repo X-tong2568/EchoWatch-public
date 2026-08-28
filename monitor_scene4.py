@@ -38,16 +38,15 @@ class Scene4Monitor:
 
     分级：L1（0~24h）→ L2（24~120h）→ L0（归档），与场景一相同阈值。
     子评论：rcount 基线节流（有评论数量字段 → 场景2式节流）。
-    截图：入库时混合策略（同场景一）——小批量（≤单批上限）立即截，
-    超限暂缓标记待补截，由补截循环分批补齐（首次大量入库不阻塞发现流程）。
+    截图：v2.0 起不再入库截图——需要原帖图时在推送前按需补截，超时/超限邮件内空着。
     """
 
     def __init__(self, db: Database, client: BiliClient, config: Config, screenshotter=None):
         self.db = db
         self.client = client
         self.config = config
-        self.screenshotter = screenshotter  # 入库截图用（混合策略，同场景一）
-        self.target_uid = config.scene4.target_uid  # 目标UP主UID（目标UP主）
+        self.screenshotter = screenshotter  # 推送前按需补截用（v2.0 起）
+        self.target_uid = config.scene4.target_uid  # 目标UP主UID
         self._polling_l1 = False
         self._polling_l2 = False
         self._disabled_until: dict = {}  # item_id → 跳过轮询截止时间（评论已关闭的帖子）
@@ -62,8 +61,7 @@ class Scene4Monitor:
 
         策略（同场景三发现）：
         - 全部入库（已存在的跳过），pub_ts 作为 first_seen_at → 旧帖自动落 L2/L0
-        - 混合截图：小批量（≤单批上限）入库时立即截，超限暂缓标记待补截，
-          由补截循环分批补齐（首次大量入库不阻塞发现流程）
+        - v2.0 起不截原帖图（入库仅数据），推送时按需补截
         - 跨场景去重：comment_oid 已被其他场景占用则跳过（场景一不受限，
           联合投稿场景由场景一先手，此处自然跳过，不会双份监测）
 

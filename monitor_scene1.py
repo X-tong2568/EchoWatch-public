@@ -97,9 +97,6 @@ class Scene1Monitor:
             return
 
         new_count = 0
-        # 混合截图策略：本轮已现场截图的张数，超过单批上限后暂缓，交补截循环分批补
-        shot_taken = 0
-        max_shot = self.config.screenshot.max_per_batch
         for dyn in dynamics:
             dyn_id = dyn.get("dynamic_id", "")
             comment_oid = dyn.get("comment_oid", "")
@@ -123,38 +120,8 @@ class Scene1Monitor:
             )
             if inserted:
                 new_count += 1
-                # 老帖（发布超120h，入库即归档L0）不截图也不标记待补截：
-                # 风控降级拉入的历史投稿不会进轮询队列，原帖截图无邮件用途，
-                # 无谓的浏览器页面加载会烧掉大量机场流量（2026-08-28 流量事故）。
-                # pub_ts 可能是字符串（B站API），先转int，异常按0处理=不跳过
-                try:
-                    pub_ts_int = int(float(pub_ts))
-                except (ValueError, TypeError):
-                    pub_ts_int = 0
-                if pub_ts_int > 0 and (
-                    (datetime.now() - datetime.fromtimestamp(pub_ts_int)).total_seconds()
-                    > self.config.thresholds.level2_hours * 3600
-                ):
-                    continue
-                # 入库时截图（非 priority 项）：
-                # 小批量立即截，截图失败标记待补截；本轮超过 max_per_batch 张后暂缓，
-                # 由补截循环分批补齐（首次大量入库不阻塞发现流程）。
-                # priority（日常分享）不附原帖截图，不截也不标记。
-                if self.screenshotter and not is_priority:
-                    if shot_taken < max_shot:
-                        # 无论成败都计入本轮截图额度（防慢：失败留待补截循环，不拖慢发现）
-                        shot_taken += 1
-                        try:
-                            shot_path = await self.screenshotter.take_dynamic_screenshot(dyn_id)
-                            if shot_path is None:
-                                await self.db.mark_screenshot_pending(dyn_id)
-                                logger.warning(f"入库截图未成功，已标记待补截 ({dyn_id})")
-                        except Exception as e:
-                            await self.db.mark_screenshot_pending(dyn_id)
-                            logger.warning(f"入库截图失败，已标记待补截 ({dyn_id}): {e}")
-                    else:
-                        await self.db.mark_screenshot_pending(dyn_id)
-                        logger.debug(f"本轮截图已达上限 ({max_shot})，暂缓待补截: {dyn_id}")
+                # v2.0：不再入库即截图——截图改为推送时按需补截（有目标互动的帖才截），
+                # 发现层绝大多数动态不会被推送，白截浪费机场流量（2026-08-28 流量事故）
             else:
                 # 已存在但oid可能不对，尝试修正（动态ID → 真实aid）
                 await self.db.update_comment_oid(dyn_id, comment_oid)

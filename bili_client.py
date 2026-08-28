@@ -328,12 +328,17 @@ class BiliClient:
     - 自动获取buvid3（匿名设备指纹），仅用于空间动态API
     """
 
-    def __init__(self, breaker_cooldown_seconds: int = 1800):
+    def __init__(self, breaker_cooldown_seconds: int = 1800, comment_direct: bool = False):
         """
         初始化客户端，HTTP会话延迟创建。
 
         breaker_cooldown_seconds: 风控熔断冷却时长（秒，来自 config.breaker.ratelimit_cooldown_seconds）
+        comment_direct: True=评论/子评论扫描直连（不读代理环境变量）——
+            评论接口对IP不敏感（space feed被-412时评论照常应答），直连可让主功能
+            不受机场/代理故障连累（2026-08-28 新增，观察期验证）
         """
+        self._comment_direct = comment_direct
+        logger.info(f"评论接口通道: {'直连(不代理)' if comment_direct else '代理'}")
         self._session: Optional[aiohttp.ClientSession] = None
         self._sub_session: Optional[aiohttp.ClientSession] = None  # 子评论翻页专用会话（独立CookieJar）
         self._mixin_key: Optional[str] = None
@@ -383,7 +388,10 @@ class BiliClient:
                     timeout = aiohttp.ClientTimeout(total=30)
                     self._sub_session = aiohttp.ClientSession(
                         headers=HEADERS, connector=connector, timeout=timeout,
-                        cookie_jar=aiohttp.CookieJar(), trust_env=True,
+                        cookie_jar=aiohttp.CookieJar(),
+                        # 评论/子评论通道：默认代理（trust_env读HTTP_PROXY），
+                        # comment.direct=True 时直连（不读环境变量），防机场故障连累主功能
+                        trust_env=not self._comment_direct,
                     )
         return self._sub_session
 
