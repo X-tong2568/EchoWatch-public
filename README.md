@@ -194,3 +194,9 @@ MIT
 | v1.7.0 | 2026-08-16 | 项目整理 |
 
 > 详细更新内容见 [CHANGELOG.md](CHANGELOG.md)
+
+---
+
+## 致谢
+
+本项目 v2.1 的修复经由 work Buddy（腾讯 hy4 preview 模型）的静态代码审查发现，特此致谢。
