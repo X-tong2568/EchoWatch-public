@@ -99,7 +99,7 @@ class BreakerConfig:
 @dataclass
 class CommentConfig:
     """评论接口网络通道配置（2026-08-28 新增）"""
-    direct: bool = False   # True=评论/子评论扫描直连（不代理）——主功能不再受机场挂连累；观察期验证无风控后保留
+    direct: bool = False   # 默认False=评论/子评论走代理。直连实操8/28上线，8/30实测机房IP触发回复接口风控页拦截（单日近10万条-412），已回退，保持关闭勿开启
 
 
 @dataclass
