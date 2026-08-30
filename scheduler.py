@@ -497,7 +497,7 @@ class Scheduler:
                     # 发送前兜底：本次待发互动对应的原帖若无截图，现场补截一次
                     if self.screenshotter:
                         await self._retry_screenshot_before_send(interactions)
-                    # 收集涉及的 UP主 名称（互动记录 up_uid=目标UP主，即星瞳）
+                    # 收集涉及的 UP主 名称（互动记录 up_uid=目标UP主，即目标UP主）
                     up_names = sorted({
                         self._get_up_name(it.get("up_uid", ""))
                         for it in interactions
@@ -582,7 +582,7 @@ class Scheduler:
                     # 发送前兜底：本次待发互动对应的原帖若无截图，现场补截一次
                     if self.screenshotter:
                         await self._retry_screenshot_before_send(interactions)
-                    # 收集涉及的 UP主 名称（互动记录 up_uid=目标UP主，即星瞳）
+                    # 收集涉及的 UP主 名称（互动记录 up_uid=目标UP主，即目标UP主）
                     up_names = sorted({
                         self._get_up_name(it.get("up_uid", ""))
                         for it in interactions

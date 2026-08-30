@@ -1,5 +1,5 @@
 # monitor_scene3.py
-"""EchoWatch 场景三：监测切片UP主投稿评论区中目标UP主（星瞳）的回复"""
+"""EchoWatch 场景三：监测切片UP主投稿评论区中目标UP主的回复"""
 
 import asyncio
 import random
@@ -24,16 +24,16 @@ SUB_SWEEP_REQUEST_INTERVAL = 0.8
 
 class Scene3Monitor:
     """
-    场景三：监测切片UP主投稿视频的评论区，匹配目标UP主（星瞳）的评论/回复。
+    场景三：监测切片UP主投稿视频的评论区，匹配目标UP主的评论/回复。
 
     与场景一/二的区别：
-    - 匹配对象是配置的 target_uid（星瞳），不是作品归属者（切片员）
-    - 不检查 up_action.like（那是切片员的点赞，不是星瞳的互动）
-    - 不监测置顶/priority（切片员的置顶与星瞳回复无关）
+    - 匹配对象是配置的 target_uid，不是作品归属者（切片员）
+    - 不检查 up_action.like（那是切片员的点赞，不是目标UP主的互动）
+    - 不监测置顶/priority（切片员的置顶与目标UP主回复无关）
 
     两阶段轮询（同场景一）：
     - 阶段A：拉取切片员空间动态列表 → 新视频入库（source="scene3"）
-    - 阶段B：轮询监测队列中各视频的评论区，匹配星瞳的评论/回复
+    - 阶段B：轮询监测队列中各视频的评论区，匹配目标UP主的评论/回复
 
     分级：L1（0~24h）→ L2（24~120h）→ L0（归档），与场景一相同阈值。
     子评论：rcount 基线节流（有评论数量字段 → 场景2式节流）。
@@ -45,7 +45,7 @@ class Scene3Monitor:
         self.client = client
         self.config = config
         self.screenshotter = screenshotter  # 推送前按需补截用（v2.0 起）
-        self.target_uid = config.scene3.target_uid  # 目标UP主UID（星瞳）
+        self.target_uid = config.scene3.target_uid  # 目标UP主UID
         self._polling_l1 = False
         self._polling_l2 = False
         self._disabled_until: dict = {}  # item_id → 跳过轮询截止时间（评论已关闭的帖子）
@@ -293,7 +293,7 @@ class Scene3Monitor:
 
     async def _process_comment(self, raw: dict, oid: int, comment_type, item_id: str) -> bool:
         """
-        处理单条一级评论：仅匹配 target_uid（星瞳）自己的评论。
+        处理单条一级评论：仅匹配 target_uid自己的评论。
         不检查 up_action.like（那是切片员的点赞，语义同场景2）。
 
         Args:
@@ -303,7 +303,7 @@ class Scene3Monitor:
             item_id: 所属视频ID
 
         Returns:
-            True 表示星瞳在此评论处有互动（用于统计）
+            True 表示目标UP主在此评论处有互动（用于统计）
         """
         parsed = parse_comment(raw)
         rpid = parsed["rpid"]
@@ -313,7 +313,7 @@ class Scene3Monitor:
 
         target_found = False
 
-        # 匹配目标UP主（星瞳）的评论
+        # 匹配目标UP主的评论
         if mid == self.target_uid:
             target_found = True
             await self.db.insert_interaction({
@@ -366,7 +366,7 @@ class Scene3Monitor:
                                      root_context: dict, replies_count: int = 0,
                                      force_full: bool = False) -> bool:
         """
-        拉取子评论，匹配星瞳的回复（尾部窗口翻页，同场景一 v1.6.0）。
+        拉取子评论，匹配目标UP主的回复（尾部窗口翻页，同场景一 v1.6.0）。
 
         翻页策略（楼中楼按时间升序，新回复总在尾部）：
         - 日常触发：窗口 = [基线位置-2页, 最新末页]，只翻新增部分
@@ -380,7 +380,7 @@ class Scene3Monitor:
             force_full: 强制全量扫描（sweep 兜底扫查用）
 
         Returns:
-            True 表示星瞳在此处有互动
+            True 表示目标UP主在此处有互动
         """
         SUB_PAGE = SUB_COMMENT_PAGE_SIZE
 
@@ -463,7 +463,7 @@ class Scene3Monitor:
         target_found = False
         for raw in all_subs:
             parsed = parse_sub_comment(raw)
-            # 仅匹配目标UP主（星瞳）的回复
+            # 仅匹配目标UP主的回复
             if parsed["mid"] != self.target_uid:
                 continue
 
