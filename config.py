@@ -72,6 +72,13 @@ class IntervalsConfig:
     pinned_check_interval: int = 3600   # 置顶动态自动检测间隔（秒），1小时
     sub_sweep_interval: int = 600       # 子评论基线兜底扫查间隔（秒），10分钟
     sub_sweep_max_age: int = 1800       # 基线超过该秒数（默认30分钟）强制重新翻页，防基线误标导致的永久漏检
+    # 场景四分级发现间隔（v2.1.1 流量优化，2026-09-02）：58个其他UP的 space feed
+    # 是代理流量主体（每10分钟全量拉取 ≈ 0.8~1.5GB/天）。按 UP 活跃度分级——
+    # 有 Level 1 帖（24h内有动态）的 UP 30 分钟一次新动态发现，
+    # 长期无动态（Level1=0）的 UP 18 小时拉一次（新动态最迟延迟 18h 入库，按 pub_ts 定级不漏检）
+    scene4_discover_active_seconds: int = 1800   # 场景四"近期有动态"UP的发现间隔（秒），30分钟
+    scene4_discover_idle_seconds: int = 64800    # 场景四"无动态"UP的发现间隔（秒），18小时
+    scene4_poll_seconds: int = 1800              # 场景四 L1 评论区轮询间隔（秒），30分钟（原5分钟）
 
 
 @dataclass

@@ -513,20 +513,42 @@ class Scheduler:
     # ==========================================================
 
     async def _scene4_discover_loop(self):
-        """场景四发现循环：定时拉取其他UP空间动态列表，发现新帖子"""
-        interval = self.config.intervals.discover_interval
-        logger.info(f"场景四发现循环: 每 {interval}s 执行")
+        """
+        场景四发现循环（分级间隔，v2.1.1 流量优化）：逐 UP 判断拉取时机。
+
+        背景：58 个其他UP的 space feed 全量拉取是流量主体。按 UP 活跃度分级——
+        - 近期有动态（该UP存在 Level 1 帖，24h内发过）→ 30 分钟拉一次
+        - 长期无动态（Level1=0）→ 18 小时拉一次
+        新动态发现延迟：无动态 UP 最长 18h（入库时按 pub_ts 定级，不会当新互动误报）。
+
+        每 60s 心跳检查一次到期情况；重启后 last_discover 为空 → 首轮全量拉一次
+        （一次性 58 次请求，与旧实现单轮等价，随后按分级节奏执行）。
+        """
+        active_interval = self.config.intervals.scene4_discover_active_seconds
+        idle_interval = self.config.intervals.scene4_discover_idle_seconds
+        logger.info(
+            f"场景四发现循环(分级): 有动态UP每{active_interval}s / 无动态UP每{idle_interval}s"
+        )
+        last_discover: dict = {}  # uid → 上次发现时间（内存态，重启后首轮全拉）
         while self.running:
+            now = datetime.now()
             try:
+                # 查一次 DB 拿全部 L1 帖，按 up_uid 分组判断各 UP 是否活跃（避免逐UP重复查询）
+                l1_items = await self.db.get_items_by_level(1, source="scene4")
+                l1_uids = {it.get("up_uid") for it in l1_items}
                 for other_up in self.config.scene4.other_up_list:
-                    await self.scene4.discover(other_up)
+                    interval = active_interval if other_up.uid in l1_uids else idle_interval
+                    last = last_discover.get(other_up.uid)
+                    if last is None or (now - last).total_seconds() >= interval:
+                        await self.scene4.discover(other_up)
+                        last_discover[other_up.uid] = now
             except Exception as e:
                 logger.error(f"场景四发现异常: {e}")
-            await asyncio.sleep(interval)
+            await asyncio.sleep(60)
 
     async def _scene4_poll_loop(self):
-        """场景四 L1 轮询循环：轮询 Level 1 帖子（24h内，高频）"""
-        interval = self.config.intervals.level1_poll_seconds
+        """场景四 L1 轮询循环：轮询 Level 1 帖子（24h内）——v2.1.1 起每30分钟一次（原5分钟，流量优化）"""
+        interval = self.config.intervals.scene4_poll_seconds
         logger.info(f"场景四 L1 轮询: 每 {interval}s 执行")
         while self.running:
             try:

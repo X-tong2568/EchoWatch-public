@@ -44,6 +44,10 @@ intervals:
   discover_interval: 600           # 新作品发现间隔（10分钟）
   scene2_batch_seconds: 180        # 场景二批量发送间隔（3分钟）
   pinned_check_interval: 3600      # 置顶动态自动检测间隔（秒），1小时
+  # --- 场景四分级发现间隔（v2.1.1 流量优化，可选，缺省用默认值）---
+  scene4_discover_active_seconds: 1800  # 有动态（有Level1帖）UP的发现间隔（秒），30分钟
+  scene4_discover_idle_seconds: 64800   # 无动态（Level1=0）UP的发现间隔（秒），18小时
+  scene4_poll_seconds: 1800             # 场景四L1评论区轮询间隔（秒），30分钟
 
 # --- 分级时间阈值（小时）---
 thresholds:
