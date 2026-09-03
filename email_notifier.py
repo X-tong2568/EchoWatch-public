@@ -648,7 +648,7 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         items_html += f"""
         <div class="interaction">
             <div class="label" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">
-                <span>#{i+1} {priority_badge_html} {html.escape(discovered_at)} {scene_badge} {like_badge} {reply_badge}</span>
+                <span>#{i+1} {html.escape(discovered_at)} {scene_badge} {like_badge} {reply_badge} {priority_badge_html}</span>
                 <a class="btn" href="{html.escape(comment_url)}" target="_blank" style="padding:3px 12px; font-size:11px; margin-right:0">评论直达</a>
             </div>
             {post_context_html}
