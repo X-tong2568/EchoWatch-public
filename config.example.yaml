@@ -81,6 +81,7 @@ email:
   sender_email: "your_email@qq.com"
   sender_password: "your_auth_code"     # SMTP 授权码，非 QQ 密码
   receiver_email: "receiver@example.com"
+  priority_badge_text: "优先通知"       # priority 通知徽章文案
 
 # --- 通知模式 ---
 notify:

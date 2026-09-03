@@ -414,10 +414,12 @@ def _embed_screenshot(screenshot_path: Optional[str]) -> Optional[str]:
         return None
 
 
-def build_single_email(interaction: dict, up_name: str, item_type: str = "", theme: dict = None, post_content: str = "", post_rich_content: str = "", oid_map: dict = None, include_post_context: bool = True) -> str:
+def build_single_email(interaction: dict, up_name: str, item_type: str = "", theme: dict = None, post_content: str = "", post_rich_content: str = "", oid_map: dict = None, include_post_context: bool = True, is_priority: bool = False, priority_badge_text: str = "优先通知") -> str:
     """构建单条互动邮件 HTML，可选传入预设主题（预览用）。场景二原帖自动从 sent_emails/ 读截图。
 
     include_post_context: 是否渲染原帖上下文卡片；priority 通知传 False，不附原帖内容。
+    is_priority: 该互动是否属于 priority（置顶动态），是则卡片标题行附徽章（样式随主题渐变）。
+    priority_badge_text: 徽章文案（config.email.priority_badge_text）。
     """
     if theme is None:
         theme = random_theme()
@@ -496,6 +498,11 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
     if up_liked:
         like_html = '<span class="badge">UP觉得很赞</span>'
 
+    # priority 徽章：置顶动态互动的单封通知标题行附徽章（样式随主题渐变）
+    priority_badge_html = (
+        f'<span class="badge">{html.escape(priority_badge_text)}</span>' if is_priority else ""
+    )
+
     # 渲染评论内容（文字+表情+图片），前加【UP名】标签便于识别互动来源
     safe_up = html.escape(up_name)
     content_html = render_comment_html(
@@ -519,7 +526,7 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
             <span>时间：{html.escape(discovered_at)}</span>
         </div>
         <div class="interaction">
-            <span class="badge">{reply_type}</span>{like_html}
+            <span class="badge">{reply_type}</span>{priority_badge_html}{like_html}
             {post_context_html}
             {context_html}
             <div class="text">{up_tag}{content_html}</div>
@@ -539,7 +546,7 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
 </body></html>"""
 
 
-def build_digest_email(interactions: list, up_name: str = "", post_contents: dict = None, post_rich_contents: dict = None, title: str = None, today_count: int = None, oid_map: dict = None, suppress_post_context_ids: set = None) -> str:
+def build_digest_email(interactions: list, up_name: str = "", post_contents: dict = None, post_rich_contents: dict = None, title: str = None, today_count: int = None, oid_map: dict = None, suppress_post_context_ids: set = None, priority_item_ids: set = None, priority_badge_text: str = "优先通知") -> str:
     """
     构建汇总邮件 HTML（日报 + 场景二批量共用）。
 
@@ -551,6 +558,8 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         title: 自定义标题（不传则用日期+日报默认标题）
         oid_map: item_id → comment_oid 映射（视频评论链接用真实 aid）
         suppress_post_context_ids: 不附加原帖内容的 item_id 集合（priority 子评论汇总/日报用）
+        priority_item_ids: 置顶动态 item_id 集合，命中则卡片标题行附 priority 徽章
+        priority_badge_text: priority 徽章文案（config.email.priority_badge_text）
     """
     theme = random_theme()
     today_str = datetime.now().strftime("%Y年%m月%d日")
@@ -624,6 +633,11 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         scene_badge = f'<span class="badge">{scene_name}</span>'
         # 主评论/子评论也打徽章（与单封邮件一致）
         reply_badge = f'<span class="badge">{reply_type}</span>'
+        # priority 徽章：该互动所属帖子在置顶列表内则附徽章（样式随主题渐变）
+        priority_badge_html = (
+            f'<span class="badge">{html.escape(priority_badge_text)}</span>'
+            if priority_item_ids and item_id in priority_item_ids else ""
+        )
 
         # 渲染评论内容（文字+表情+图片），前加【UP名】标签便于识别互动来源
         up_tag = f'<span class="badge">【{html.escape(up_name)}】</span>'
@@ -634,7 +648,7 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         items_html += f"""
         <div class="interaction">
             <div class="label" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">
-                <span>#{i+1} {html.escape(discovered_at)} {scene_badge} {like_badge} {reply_badge}</span>
+                <span>#{i+1} {priority_badge_html} {html.escape(discovered_at)} {scene_badge} {like_badge} {reply_badge}</span>
                 <a class="btn" href="{html.escape(comment_url)}" target="_blank" style="padding:3px 12px; font-size:11px; margin-right:0">评论直达</a>
             </div>
             {post_context_html}
@@ -779,7 +793,7 @@ class Notifier:
             subject = f"【EchoWatch】UP主「{up_name}」置顶动态有更新"
         else:
             subject = f"【EchoWatch】UP主「{up_name}」有新互动"
-        html = build_single_email(interaction, up_name, item_type, post_content=post_content, post_rich_content=post_rich, oid_map=oid_map, include_post_context=not is_priority)
+        html = build_single_email(interaction, up_name, item_type, post_content=post_content, post_rich_content=post_rich, oid_map=oid_map, include_post_context=not is_priority, is_priority=is_priority, priority_badge_text=self.config.email.priority_badge_text)
 
         result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
         if result:
@@ -1074,6 +1088,8 @@ class Notifier:
             today_count=today_count,
             oid_map=oid_map,
             suppress_post_context_ids={it["item_id"] for it in subs if it.get("item_id")},
+            priority_item_ids=priority_ids,
+            priority_badge_text=self.config.email.priority_badge_text,
         )
 
         result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
@@ -1127,7 +1143,9 @@ class Notifier:
         html = build_digest_email(interactions, up_name, post_contents,
                                   post_rich_contents=post_rich_map,
                                   today_count=today_count, oid_map=oid_map,
-                                  suppress_post_context_ids=suppress_ids)
+                                  suppress_post_context_ids=suppress_ids,
+                                  priority_item_ids=priority_ids,
+                                  priority_badge_text=self.config.email.priority_badge_text)
 
         result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
         if result:

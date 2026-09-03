@@ -1,4 +1,4 @@
-# EchoWatch（留声）v2.1.1
+# EchoWatch（留声）v2.2
 
 B站 UP主 互动监测系统 —— 实时发现 UP主 在评论区中的互动行为，通过邮件推送通知。
 
@@ -93,6 +93,7 @@ email:
   sender_email: "your@email.com"
   sender_password: "auth_code"
   receiver_email: "receiver@email.com"
+  priority_badge_text: "优先通知"    # priority 通知徽章文案
 ```
 
 > 完整配置项（轮询间隔、分级阈值、截图批次、补截间隔、风控熔断时长等）见 `config.example.yaml`。
@@ -178,6 +179,7 @@ MIT
 
 | 版本 | 日期 | 更新内容 |
 |------|------|---------|
+| v2.2 | 2026-09-04 | priority 通知卡片徽章（文案可配置） |
 | v2.1.1 | 2026-09-02 | 场景四发现分级轮询（无动态18h/有动态30min） |
 | v2.1 | 2026-08-29 | 子评论扫查风暴镇压+通知防重+归档级联清理 |
 | v2.0 | 2026-08-28 | 截图改推送时按需补截 |

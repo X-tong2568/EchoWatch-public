@@ -118,6 +118,7 @@ class EmailConfig:
     sender_email: str = ""
     sender_password: str = ""
     receiver_email: str = ""
+    priority_badge_text: str = "优先通知"   # priority 通知徽章文案
 
 
 @dataclass
