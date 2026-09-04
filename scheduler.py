@@ -663,6 +663,17 @@ class Scheduler:
                 continue
             if (save_dir / f"dynamic_{item_id}.jpeg").exists():
                 continue
+            # av 降级项先试富化：内存动态列表缓存已含该视频真实动态ID时直接升级
+            # （feed 刚恢复、发现轮次还没跑到该 UP 的窗口；零 API 成本）
+            # 仅限 scene1：scene3 切片视频的 av 前缀是常态（视频本身无动态页），不得富化
+            if item_id.startswith("av") and it.get("scene") == "scene1" and self.client:
+                real_id = self.client.match_dynamic_id_from_cache(
+                    it.get("up_uid", ""), item_id
+                )
+                if real_id and await self.db.promote_item_id(item_id, real_id):
+                    logger.info(f"发送前 av 富化: {item_id} -> {real_id}")
+                    item_id = real_id
+                    it["item_id"] = real_id
             try:
                 await self.screenshotter.take_dynamic_screenshot(item_id)
                 logger.info(f"发送前补截成功: {item_id}")

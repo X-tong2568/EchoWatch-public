@@ -503,12 +503,16 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
         f'<span class="badge">{html.escape(priority_badge_text)}</span>' if is_priority else ""
     )
 
-    # 渲染评论内容（文字+表情+图片），前加【UP名】标签便于识别互动来源
+    # 渲染评论内容（文字+表情+图片），前加【发送者昵称】标签（2026-09-04 统一）：
+    # 一律用真实评论发送者昵称（uname 入库为 comment_author）——
+    # 场景一「觉得很赞」的作者是粉丝，打 UP 名是错误信息（v1.8.1 的 bug）；
+    # 老数据无 comment_author 时降级 UP 名兜底。
     safe_up = html.escape(up_name)
     content_html = render_comment_html(
         content, interaction.get("rich_content")
     )
-    up_tag = f'<span class="badge">【{safe_up}】</span>'
+    comment_author = interaction.get("comment_author") or up_name
+    up_tag = f'<span class="badge">【{html.escape(comment_author)}】</span>'
 
     trace = f"cid={rpid} | scene={scene} | {theme['primary']}→{theme['secondary']}"
     return f"""<!DOCTYPE html>
@@ -639,8 +643,12 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
             if priority_item_ids and item_id in priority_item_ids else ""
         )
 
-        # 渲染评论内容（文字+表情+图片），前加【UP名】标签便于识别互动来源
-        up_tag = f'<span class="badge">【{html.escape(up_name)}】</span>'
+        # 渲染评论内容（文字+表情+图片），前加【发送者昵称】标签（2026-09-04 统一）：
+        # 一律用真实评论发送者昵称（uname 入库为 comment_author）——
+        # 场景一「觉得很赞」的作者是粉丝，打 UP 名是错误信息（v1.8.1 的 bug）；
+        # 老数据无 comment_author 时降级 UP 名兜底。
+        comment_author = interaction.get("comment_author") or up_name
+        up_tag = f'<span class="badge">【{html.escape(comment_author)}】</span>'
         content_html = render_comment_html(
             content, interaction.get("rich_content")
         )

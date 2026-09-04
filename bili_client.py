@@ -678,6 +678,32 @@ class BiliClient:
         logger.warning(f"风控兜底：使用 {uid} 的动态列表缓存 ({len(result)} 条)")
         return result
 
+    def match_dynamic_id_from_cache(self, uid: str, av_item_id: str) -> Optional[str]:
+        """
+        从内存动态列表缓存中查找 av 降级项对应的真实动态ID（富化辅助，零API成本）。
+
+        背景：av{aid} 降级项没有动态页可截（空间动态API风控期间的视频搜索降级），
+        而动态列表缓存来自正常 feed（含真实动态ID），按键 aid 匹配即可还原
+        （2026-09-04 截图 bug 修复）。
+
+        Args:
+            uid: UP主 uid（缓存按 uid 分）
+            av_item_id: av 前缀 item_id（如 av123456789012）
+
+        Returns:
+            真实动态ID（纯数字）；缓存未命中或没有对应视频返回 None
+        """
+        if not av_item_id.startswith("av") or not uid:
+            return None
+        aid = av_item_id[2:]
+        cached = self._get_dyn_cache(uid)
+        if not cached:
+            return None
+        for item in cached:
+            if str(item.get("comment_oid", "")) == aid and not str(item.get("dynamic_id", "")).startswith("av"):
+                return item.get("dynamic_id", "")
+        return None
+
     # ----------------------------------------------------------
     # 评论获取（场景一+二共用）
     # ----------------------------------------------------------

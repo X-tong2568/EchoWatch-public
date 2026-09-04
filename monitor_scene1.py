@@ -116,6 +116,13 @@ class Scene1Monitor:
                 comment_oid, source="scene1", up_uid=up.uid
             )
             if existing and existing["item_id"] != dyn_id:
+                # 富化（2026-09-04）：已有项是 av 降级项（只有 aid，截图只能截视频播放页），
+                # 本轮 feed 拿到真实动态ID → 升级 item_id 为真实ID，后续截图/链接走正常动态页
+                if existing["item_id"].startswith("av") and not dyn_id.startswith("av"):
+                    await self.db.promote_item_id(
+                        existing["item_id"], dyn_id, new_content=dyn.get("content", "")
+                    )
+                    continue
                 await self.db.update_comment_oid(existing["item_id"], comment_oid)
                 continue
 
@@ -388,6 +395,7 @@ class Scene1Monitor:
                 "parent_author": None,
                 "content": content,
                 "rich_content": parsed.get("rich_content", ""),
+                "comment_author": parsed["uname"],  # 真实发送者昵称（统一徽章用）
                 "up_liked": False,  # UP主自己的评论不标记up_liked
                 "scene": "scene1",
             })
@@ -403,6 +411,7 @@ class Scene1Monitor:
                 "parent_author": None,
                 "content": content,
                 "rich_content": parsed.get("rich_content", ""),
+                "comment_author": parsed["uname"],  # 评论作者（粉丝），非 UP
                 "up_liked": True,
                 "scene": "scene1",
             })
@@ -584,6 +593,7 @@ class Scene1Monitor:
                     "parent_rich_content": parent_rich,
                     "content": parsed["content"],
                     "rich_content": parsed.get("rich_content", ""),
+                    "comment_author": parsed["uname"],  # 真实发送者昵称（统一徽章用）
                     "up_liked": False,
                     "scene": scene,
                 })
@@ -600,6 +610,7 @@ class Scene1Monitor:
                     "parent_author": "",
                     "content": parsed["content"],
                     "rich_content": parsed.get("rich_content", ""),
+                    "comment_author": parsed["uname"],
                     "up_liked": True,
                     "scene": scene,
                 })

@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS interactions (
     parent_author       TEXT,
     content             TEXT,
     rich_content        TEXT,
+    comment_author      TEXT,
     up_liked            INTEGER DEFAULT 0,
     scene               TEXT NOT NULL,
     discovered_at       TEXT NOT NULL,
@@ -148,6 +149,7 @@ class Database:
         await self._migrate_add_post_rich_content()
         await self._migrate_add_parent_rich_content()
         await self._migrate_add_screenshot_pending()
+        await self._migrate_add_comment_author()
 
         await self._conn.commit()
         logger.info(f"数据库初始化完成: {self.db_path}")
@@ -235,6 +237,20 @@ class Database:
             )
             await self._conn.commit()
             logger.info("数据库迁移: 已添加 monitored_items.screenshot_pending 列")
+
+    async def _migrate_add_comment_author(self):
+        """迁移：给已有数据库的 interactions 表加 comment_author 列（如不存在）
+
+        用途：邮件评论内容前的【发送者昵称】徽章——统一存真实评论发送者昵称
+        （uname）；场景一「觉得很赞」的作者是粉丝，不能打 UP 名（v1.8.1 的 bug，
+        2026-09-04 修复）。老数据该列为空，渲染时降级用 UP 名。
+        """
+        columns = await self._conn.execute_fetchall("PRAGMA table_info(interactions)")
+        col_names = [row[1] for row in columns]
+        if "comment_author" not in col_names:
+            await self._conn.execute("ALTER TABLE interactions ADD COLUMN comment_author TEXT")
+            await self._conn.commit()
+            logger.info("数据库迁移: 已添加 interactions.comment_author 列")
 
     # ----------------------------------------------------------
     # monitored_items 表操作
@@ -396,6 +412,62 @@ class Database:
             logger.info(f"oid已修正: {item_id[:20]}... {old_oid} -> {new_oid}")
             return True
         return False
+
+    async def promote_item_id(self, old_item_id: str, new_item_id: str,
+                              new_content: str = "") -> bool:
+        """
+        av 降级项升级为真实动态ID（三表联动）：monitored_items + interactions + sub_comment_baseline。
+
+        背景：空间动态API风控时用视频搜索降级入库，item_id=av{aid} 只有视频页可截
+        （播放器页截图效果差）；feed 恢复后同一视频以真实动态 ID 出现时，
+        把 av 项升级为真实 ID，此后截图/链接走正常动态页（2026-09-04 修复）。
+
+        Args:
+            old_item_id: 现有 av 前缀 item_id
+            new_item_id: 真实动态 ID（纯数字）
+            new_content: 动态正文（非空则一并更新 post_content，补上降级时丢失的文案）
+
+        Returns:
+            True 表示已升级
+        """
+        # 防误删：新ID须为纯数字动态ID（bituuid为负场景不吃），且与旧ID不同
+        if not new_item_id or not str(new_item_id).isdigit() or new_item_id == old_item_id:
+            return False
+        # UNIQUE(item_id) 冲突防护：目标ID已存在时（理论上是重复行），
+        # 保留已在库的行，只把旧行的互动记录重指向它后删掉旧行
+        exists = await self._conn.execute_fetchall(
+            "SELECT item_id FROM monitored_items WHERE item_id = ?", (new_item_id,)
+        )
+        if exists:
+            await self._conn.execute(
+                "UPDATE interactions SET item_id = ? WHERE item_id = ?",
+                (new_item_id, old_item_id),
+            )
+            await self._conn.execute(
+                "UPDATE sub_comment_baseline SET item_id = ? WHERE item_id = ?",
+                (new_item_id, old_item_id),
+            )
+            await self._conn.execute(
+                "DELETE FROM monitored_items WHERE item_id = ?", (old_item_id,)
+            )
+            await self._conn.commit()
+            logger.info(f"av项合并: {old_item_id} -> 已有 {new_item_id}（重指互动后删除旧行）")
+            return True
+        await self._conn.execute(
+            "UPDATE monitored_items SET item_id = ?, post_content = CASE WHEN ? != '' THEN ? ELSE post_content END WHERE item_id = ?",
+            (new_item_id, new_content, new_content, old_item_id),
+        )
+        await self._conn.execute(
+            "UPDATE interactions SET item_id = ? WHERE item_id = ?",
+            (new_item_id, old_item_id),
+        )
+        await self._conn.execute(
+            "UPDATE sub_comment_baseline SET item_id = ? WHERE item_id = ?",
+            (new_item_id, old_item_id),
+        )
+        await self._conn.commit()
+        logger.info(f"av项富化: {old_item_id} -> {new_item_id}")
+        return True
 
     async def clear_stale_priority(self, keep_ids: list[str]):
         """清除不在 keep_ids 中的 priority 标记。keep_ids 为空时清除全部。"""
@@ -559,9 +631,9 @@ class Database:
         INSERT OR IGNORE INTO interactions
             (up_uid, item_id, comment_id, is_sub_reply,
              parent_content, parent_author, parent_rich_content,
-             content, rich_content, up_liked,
+             content, rich_content, comment_author, up_liked,
              scene, discovered_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         cursor = await self._conn.execute(sql, (
             data.get("up_uid"),
@@ -573,6 +645,7 @@ class Database:
             data.get("parent_rich_content"),
             data.get("content"),
             data.get("rich_content"),
+            data.get("comment_author"),
             1 if data.get("up_liked") else 0,
             data.get("scene"),
             now,
