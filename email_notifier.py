@@ -5,6 +5,7 @@ import asyncio
 import base64
 import html
 import json
+import math
 import random
 import re
 import smtplib
@@ -25,7 +26,16 @@ from logger_config import logger
 # ============================================================
 
 # 弃用氛围色板，色相完全随机 0-360，每次都不一样
-_MOODS = [{"name": "随机", "hue": (0, 360), "sat": (50, 72), "light": (42, 55)}]
+# 饱和度/明度区间已放宽（原 50~72 / 42~55）：区间太窄时"同色相不同深浅"看起来就是同一个颜色
+_MOODS = [{"name": "随机", "hue": (0, 360), "sat": (35, 85), "light": (32, 62)}]
+
+# 主色去重：状态文件记录最近用过的主色，新颜色与它们太像就重抽。
+# 窗口长度实测（仿真 8 轮 x 550 封）：20 能压掉"同日近似色"且几乎不触发兜底；
+# 30 起开始退化（重抽变多、兜底放行反而放进撞色），45 时 26% 靠兜底。
+THEME_STATE_FILE = Path(__file__).parent / "theme_state.json"
+_RECENT_COLOR_KEEP = 20    # 记住最近 20 封的主色（约 2 天邮件量）
+_COLOR_MIN_DIST = 50       # 新主色与它们的最小 RGB 欧氏距离（满值 441）
+_DEDUP_RETRY_MAX = 30      # 重抽上限，超了用最后一次兜底，保证一定出颜色
 
 # 四种顶栏纹理：纯CSS背景图案，叠加在渐变上
 _TEXTURES = [
@@ -118,6 +128,57 @@ def _hsl_to_hex(h: int, s: int, l: int) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+def _color_distance(c1: str, c2: str) -> float:
+    """两个 HEX 颜色的 RGB 欧氏距离（0~441），用来判断"看起来像不像" """
+    r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+    r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+    return math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2)
+
+
+def _load_recent_colors() -> list:
+    """读取最近用过的主色 HEX 列表（文件不存在或损坏时返回空列表）"""
+    try:
+        data = json.loads(THEME_STATE_FILE.read_text(encoding="utf-8"))
+        colors = data.get("recent_colors", [])
+        return [c for c in colors if isinstance(c, str) and len(c) == 7]
+    except Exception:
+        return []
+
+
+def _remember_color(recent: list, color: str):
+    """把本次主色写回状态文件（只留最近 _RECENT_COLOR_KEEP 个），失败不影响发信"""
+    try:
+        THEME_STATE_FILE.write_text(
+            json.dumps({"recent_colors": (recent + [color])[-_RECENT_COLOR_KEEP:]},
+                       ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning(f"主题状态写入失败（不影响发信）: {e}")
+
+
+def _pick_primary(mood: dict, recent: list) -> tuple:
+    """
+    抽一个主色，尽量避开最近用过的颜色。
+
+    入参：mood 氛围色板（含 hue/sat/light 区间）、recent 最近用过的主色 HEX 列表
+    出参：(hex, hue, sat, light) —— 后三个给副色计算用
+    最多重抽 _DEDUP_RETRY_MAX-1 次，仍未拉开距离就用最后一次兜底
+    """
+    for _ in range(_DEDUP_RETRY_MAX - 1):
+        hue = random.randint(*mood["hue"])
+        sat = random.randint(*mood["sat"])
+        light = random.randint(*mood["light"])
+        primary = _hsl_to_hex(hue, sat, light)
+        if all(_color_distance(primary, c) >= _COLOR_MIN_DIST for c in recent):
+            return primary, hue, sat, light
+
+    hue = random.randint(*mood["hue"])
+    sat = random.randint(*mood["sat"])
+    light = random.randint(*mood["light"])
+    return _hsl_to_hex(hue, sat, light), hue, sat, light
+
+
 def random_theme() -> dict:
     """
     生成一套完整的随机主题。
@@ -125,15 +186,15 @@ def random_theme() -> dict:
     包含：主色、副色、氛围名、顶栏纹理、卡片阴影、分割线样式。
 
     策略：
-    1. 从 6 种氛围中随机选一种，在氛围色相范围内取色 —— 保证不翻车
-    2. 副色 50% 互补色 / 50% 邻近色 —— 保留随机感
-    3. 纹理、阴影、分割线各从预设池随机抽取
+    1. 色相完全随机 0~360，饱和度/明度在放宽后的区间内随机
+    2. 主色与最近 20 封用过的主色拉开距离（太像就重抽），避免"连着几天同一个颜色"
+    3. 副色 50% 互补色 / 50% 邻近色 —— 保留随机感
+    4. 纹理、阴影、分割线各从预设池随机抽取
     """
     mood = random.choice(_MOODS)
-    hue = random.randint(*mood["hue"])
-    sat = random.randint(*mood["sat"])
-    light = random.randint(*mood["light"])
-    primary = _hsl_to_hex(hue, sat, light)
+    recent = _load_recent_colors()
+    primary, hue, sat, light = _pick_primary(mood, recent)
+    _remember_color(recent, primary)
 
     # 副色：50%互补色 / 50%邻近色
     if random.random() < 0.5:

@@ -26,6 +26,9 @@ cookies.json
 # 置顶动态状态文件（运行时自动生成）
 pinned_dynamic_state.json
 
+# 邮件主题色历史（运行时自动生成，用于避开最近用过的颜色）
+theme_state.json
+
 # 数据库（运行时生成）
 *.db
 *.db-shm
