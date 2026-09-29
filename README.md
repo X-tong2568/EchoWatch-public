@@ -161,6 +161,7 @@ echowatch/
 ├── retry_decorator.py          # 重试装饰器
 ├── requirements.txt            # 依赖清单
 ├── CHANGELOG.md                # 版本更新记录
+├── bili-api-guide.md           # B站 API 速查表
 ├── 开发者指南.md               # 开发者指南（API详解 + 实现原理）
 └── .gitignore
 ```
