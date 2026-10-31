@@ -746,6 +746,23 @@ class Database:
         await self._conn.execute(sql, (item_id, str(root_rpid), last_rcount, last_check_ts))
         await self._conn.commit()
 
+    async def delete_sub_baseline(self, item_id: str, root_rpid):
+        """
+        删除指定根评论的子评论基线。
+
+        用于评论已被删除/不存在的场景（API code 12006/12022），
+        避免死基线每轮扫查反复请求。
+
+        Args:
+            item_id: 所属作品ID
+            root_rpid: 根评论 rpid
+        """
+        await self._conn.execute(
+            "DELETE FROM sub_comment_baseline WHERE item_id=? AND root_rpid=?",
+            (item_id, str(root_rpid)),
+        )
+        await self._conn.commit()
+
     async def mark_notified_immediate(self, ids: list[int]):
         """标记为已即时通知"""
         if not ids:

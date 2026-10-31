@@ -812,9 +812,17 @@ class BiliClient:
                 )
         except RuntimeError as e:
             # 确定性错误码：重试无意义，快速失败返回空
-            if any(f"code={code}" in str(e) for code in (-400, -404, 12002, 12022)):
+            # 12006=没有该评论，12022=评论已删除；这两类根评论已不存在，
+            # 调用方应删除对应基线，避免每轮扫查反复请求
+            if any(f"code={code}" in str(e) for code in (-400, -404, 12002, 12006, 12022)):
                 logger.warning(f"get_sub_comments 确定性失败(不重试) root={root_rpid}: {e}")
-                return {"replies": [], "page": {"count": 0}, "disabled": True}
+                not_found = any(f"code={code}" in str(e) for code in (12006, 12022))
+                return {
+                    "replies": [],
+                    "page": {"count": 0},
+                    "disabled": True,
+                    "not_found": not_found,
+                }
             # -412 风控：重试窗口期内大概率持续失败，50s×3 纯刷错误日志。
             # 快速失败返回 banned 标志，调用方跳过本轮，下轮扫查再试
             if "code=-412" in str(e):

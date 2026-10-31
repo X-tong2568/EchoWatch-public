@@ -659,6 +659,10 @@ class Scene1Monitor:
             except Exception as e:
                 logger.debug(f"子评论基线扫查失败 item={row['item_id']} root={root_rpid}: {e}")
                 continue
+            if resp.get("not_found"):
+                await self.db.delete_sub_baseline(row["item_id"], root_rpid)
+                logger.info(f"子评论基线清理: item={row['item_id']} root={root_rpid} 评论已不存在")
+                continue
             count = (resp.get("page") or {}).get("count", 0)
             if not count:
                 continue

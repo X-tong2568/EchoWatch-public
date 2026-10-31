@@ -547,6 +547,10 @@ class Scene4Monitor:
                 continue
             # 限速：每基线1次 count 请求后等待，降低批量扫查的请求密度
             await asyncio.sleep(SUB_SWEEP_REQUEST_INTERVAL)
+            if resp.get("not_found"):
+                await self.db.delete_sub_baseline(row["item_id"], root_rpid)
+                logger.info(f"场景四子评论基线清理: item={row['item_id']} root={root_rpid} 评论已不存在")
+                continue
             count = (resp.get("page") or {}).get("count", 0)
             if not count:
                 continue
