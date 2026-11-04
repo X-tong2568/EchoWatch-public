@@ -908,7 +908,7 @@ class Notifier:
         new_link = f"https://t.bilibili.com/{new_id}" if new_id else ""
         old_link = f"https://t.bilibili.com/{old_id}" if old_id else ""
 
-        html = f"""<!DOCTYPE html>
+        body = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"></head>
 <body style="margin:0;padding:20px;background:#f5f5f5;font-family:'Microsoft YaHei',sans-serif;">
@@ -933,7 +933,7 @@ class Notifier:
       </tr>"""
 
         if old_id:
-            html += f"""
+            body += f"""
       <tr>
         <td style="padding:10px 12px;background:#f9f9f9;color:#666;">旧置顶</td>
         <td style="padding:10px 12px;">
@@ -942,7 +942,7 @@ class Notifier:
       </tr>"""
 
         if new_id:
-            html += f"""
+            body += f"""
       <tr>
         <td style="padding:10px 12px;background:#f9f9f9;color:#666;">新置顶</td>
         <td style="padding:10px 12px;">
@@ -950,7 +950,7 @@ class Notifier:
         </td>
       </tr>"""
 
-        html += f"""
+        body += f"""
     </table>
     <p style="font-size:12px;color:#999;margin-top:20px;text-align:center;">
       系统已自动更新 Priority 监测目标，新置顶将纳入高频轮询
@@ -961,11 +961,11 @@ class Notifier:
 </html>"""
 
         subject = f"【EchoWatch】UP主「{up_name}」{title_text}"
-        result = await asyncio.to_thread(_send_email_sync, subject, html, self.config)
+        result = await asyncio.to_thread(_send_email_sync, subject, body, self.config)
         if result:
             logger.info(f"置顶变更邮件已发送: {up_name} old={old_id} new={new_id}")
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            _archive_email(f"{ts}_pinned_change_{up_uid}.html", html)
+            _archive_email(f"{ts}_pinned_change_{up_uid}.html", body)
         else:
             logger.warning(f"置顶变更邮件发送失败: {up_name}")
 
