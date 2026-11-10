@@ -192,7 +192,7 @@ class Screenshotter:
             # 先种游客 cookie，再访问目标页面（顺序不能反）
             await self._seed_cookies(page)
 
-            # 降级路径（空间动态API风控）的 item_id 带 av 前缀，如 av117032272005640：
+            # 降级路径（空间动态API风控）的 item_id 带 av 前缀，如 av123456789012：
             # 没有动态页，只能截视频页（www.bilibili.com/video/av{aid}），走全页降级截图
             is_av_fallback = dynamic_id.startswith("av")
             if is_av_fallback:

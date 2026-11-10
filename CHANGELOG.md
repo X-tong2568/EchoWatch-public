@@ -1,3 +1,78 @@
+## v2.7 (2026-11-10) — 互动归档改为按月
+
+### 变更
+
+- **归档粒度**：`comments/` 从 `YYYY/MM/YYYYMMDD.md` 日文件改为 `comments/YYYY-MM.md` + `.csv`，
+  与其他归档分组的月度结构一致
+- **月 MD 表头**：增加 `ARCHIVE_HEADER_START/END` 表头块（时间 / 类别 / 摘要 / 本月条数），
+  事件块按时间排序，可在 GitHub 页面直接浏览
+- **资源路径**：月文件里的表情路径从 `../../assets/` 改为 `assets/`
+- **置顶竞态**：切换竞态兜底从扫描最近 2 天改为扫描最近 2 个月的月文件
+- **索引**：`comments/README.md` 改为月份索引，根 README 的粉丝互动链接改为
+  `comments/YYYY-MM.md` + CSV
+- **数据迁移**：69 个日文件共 451 条合并为 2026-07 ~ 2026-10 四个月文件，日目录删除
+- **测试**：新增月表头/同月合并断言，16 条离线测试通过
+
+AI-assisted: Claude Code (Anthropic)
+
+## v2.6 (2026-11-10) — 根 README 粉丝互动按月索引
+
+### 变更
+
+- **根 README 月份索引**：每次归档 flush 时，从 `comments/README.md` 的月份索引刷新
+  归档仓根 README 的「粉丝互动」段；月份链接指向 `comments/YYYY-MM.md` + CSV，
+  目录入口保留在末尾。新自动归档的互动无需等通知归档下一轮刷新
+- **只改自己的一段**：只替换 `<!-- ARCHIVE_INDEX_START -->` 内的「粉丝互动」段，
+  其他分类原样保留
+- **并发安全**：与通知归档共用根 README，各自只改自己的段；Git Data API 返回
+  NonFastForward 时 flush 重读 base 后重试，不会覆盖对方提交
+- **测试**：`tests/test_archive.py` 新增根 README 月份索引断言
+  （新增月份、同月不重复、其他分类保留），共 15 条离线测试通过
+
+AI-assisted: Claude Code (Anthropic)
+
+## v2.5 (2026-11-10) — GitHub 互动归档 + 置顶旁注
+
+> 目标：把每次邮件通知过的互动写进通知归档已经在用的私有仓，
+> 形成该 UP 主的全息时间线；同时消解 EchoWatch priority 与置顶归档的内容重叠。
+
+### 新增
+
+- **`echowatch_archive.py`**：Git Data API 归档模块
+  - 只写 `comments/` 与 `pinned/_thread/`，永不碰 `dynamics/`、`live/`、
+    `pinned/YYYY-MM.md`、根 `README.md`（v2.6 起只改粉丝互动段）
+  - blob -> tree -> commit -> PATCH ref；冲突重读 base，退避 0.8/1.6/3.2 秒重试
+  - 幂等键 `interactions.comment_id`，账本 `comments/_state/archived_rpids.json`（最近 5000）
+  - 队列 `deque(maxlen=2000)`，flush 独立 asyncio task（默认 180 秒）
+  - 图片转 WebP（1280 长边 / q80）；源图被 30 天清理后静默降级纯文本
+- **置顶游标路由**：通知归档写 `_state/pinned_cursor.json`，EchoWatch 只读；
+  `rpid == pinned_rpid` 的正文只进 `pinned/_thread/`，`comments/` 只留指针；
+  切换竞态用“最近 2 天回头看”搬移；同 rpid 内容漂移以通知归档快照为准
+- **`never_archive` 表**：冻结当前/上一任置顶 item，
+  `archive_stale` 与 `set_level(0)` 的基线级联清理双双跳过
+- **邮件 6 处钩子**：immediate / scene2/3/4 batch / priority_sub_batch / daily_digest
+  发送成功后 `enqueue`；失败分支不入队
+- **配置**：`config_github.example.py`（与通知归档同名字段 + 3 个 e 专属项），
+  YAML `github_archive:` 段覆盖，环境变量兜底；`DRY_RUN` 默认 true
+- **测试**：`tests/test_archive.py` 13 条离线断言（幂等、转义、emoji、URL、
+  置顶指针、切换竞态、content-drift、截图缺失、never_archive、av 富化联动、
+  并发、断网、作者分离）
+
+### 变更
+
+- `Notifier` 增加可选 `archive` 参数；`Scheduler` 增加 flush 循环；
+  `main.py` 退出前 `flush("shutdown")`
+- priority 邮件模板加一行提示：`本条即当前置顶评论 · 快照见置顶归档`
+- 自动归档 MD 表情改为本地 WebP 图片，与通知归档格式一致；CSV 仍保留 `[表情名]`
+- `requirements.txt` 增加 `requests`、`Pillow`
+
+### 验证
+
+- `python -m unittest tests.test_archive`：13 条全绿
+- `DRY_RUN` 预览产物：comments MD/CSV、thread 日 MD、账本、index 均正常生成
+
+AI-assisted: Claude Code (Anthropic)
+
 ## v2.4 (2026-09-29) — 邮件主题配色随机性优化
 
 ### 变更

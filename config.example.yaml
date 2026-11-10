@@ -97,6 +97,22 @@ screenshot:
   save_dir: "sent_emails"          # 截图保存目录
   retry_interval: 600              # 截图失败补截循环间隔（秒）
 
+# --- GitHub 互动归档（v2.5，可选）---
+# 与通知归档共用同一个私有归档仓；token 建议只放在 config_github.py 或环境变量里
+github_archive:
+  enabled: false                   # 是否启用归档
+  owner: "your-github-username"
+  repo: "your-archive-repo"
+  branch: "main"
+  token: ""                        # fine-grained PAT，只授该私有仓 Contents: R/W
+  timeout: 20
+  dry_run: true                    # 默认 true：只写 data/archive_preview/
+  image_max_size: 1280
+  webp_quality: 80
+  anonymize_nick: false            # true=昵称哈希成 粉丝#abcd
+  never_archive_pinned: true       # 冻结历史置顶，防 L0 级联清理
+  flush_seconds: 180               # 归档 flush 间隔（秒）
+
 # --- 数据库 ---
 database:
   path: "monitor.db"               # SQLite 数据库文件路径

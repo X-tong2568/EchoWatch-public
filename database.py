@@ -59,6 +59,17 @@ CREATE TABLE IF NOT EXISTS interactions (
 )
 """
 
+CREATE_NEVER_ARCHIVE = """
+CREATE TABLE IF NOT EXISTS never_archive (
+    item_id     TEXT NOT NULL,
+    rpid        TEXT NOT NULL DEFAULT '',
+    reason      TEXT NOT NULL DEFAULT '',
+    since       TEXT NOT NULL DEFAULT '',
+    created_at  TEXT DEFAULT (datetime('now', 'localtime')),
+    PRIMARY KEY (item_id, rpid)
+)
+"""
+
 CREATE_TOPIC_OFFSET = """
 CREATE TABLE IF NOT EXISTS topic_offset (
     topic_id                    INTEGER PRIMARY KEY,
@@ -96,6 +107,7 @@ CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_interactions_upuid ON interactions(up_uid)",
     "CREATE INDEX IF NOT EXISTS idx_interactions_notified ON interactions(notified_immediate, notified_digest)",
     "CREATE INDEX IF NOT EXISTS idx_interactions_discovered ON interactions(discovered_at)",
+    "CREATE INDEX IF NOT EXISTS idx_never_archive_item ON never_archive(item_id)",
 ]
 
 
@@ -138,6 +150,7 @@ class Database:
         await self._conn.execute(CREATE_TOPIC_OFFSET)
         await self._conn.execute(CREATE_SUB_COMMENT_BASELINE)
         await self._conn.execute(CREATE_DIGEST_STATE)
+        await self._conn.execute(CREATE_NEVER_ARCHIVE)
 
         # 建索引
         for idx_sql in CREATE_INDEXES:
@@ -416,7 +429,8 @@ class Database:
     async def promote_item_id(self, old_item_id: str, new_item_id: str,
                               new_content: str = "") -> bool:
         """
-        av 降级项升级为真实动态ID（三表联动）：monitored_items + interactions + sub_comment_baseline。
+        av 降级项升级为真实动态ID（四表联动）：
+        monitored_items + interactions + sub_comment_baseline + never_archive。
 
         背景：空间动态API风控时用视频搜索降级入库，item_id=av{aid} 只有视频页可截
         （播放器页截图效果差）；feed 恢复后同一视频以真实动态 ID 出现时，
@@ -447,6 +461,15 @@ class Database:
                 "UPDATE sub_comment_baseline SET item_id = ? WHERE item_id = ?",
                 (new_item_id, old_item_id),
             )
+            # never_archive 跟随迁移；目标已有同 rpid 时 INSERT OR IGNORE 保底
+            await self._conn.execute(
+                "INSERT OR IGNORE INTO never_archive(item_id, rpid, reason, since, created_at) "
+                "SELECT ?, rpid, reason, since, created_at FROM never_archive WHERE item_id = ?",
+                (new_item_id, old_item_id),
+            )
+            await self._conn.execute(
+                "DELETE FROM never_archive WHERE item_id = ?", (old_item_id,)
+            )
             await self._conn.execute(
                 "DELETE FROM monitored_items WHERE item_id = ?", (old_item_id,)
             )
@@ -464,6 +487,14 @@ class Database:
         await self._conn.execute(
             "UPDATE sub_comment_baseline SET item_id = ? WHERE item_id = ?",
             (new_item_id, old_item_id),
+        )
+        await self._conn.execute(
+            "INSERT OR IGNORE INTO never_archive(item_id, rpid, reason, since, created_at) "
+            "SELECT ?, rpid, reason, since, created_at FROM never_archive WHERE item_id = ?",
+            (new_item_id, old_item_id),
+        )
+        await self._conn.execute(
+            "DELETE FROM never_archive WHERE item_id = ?", (old_item_id,)
         )
         await self._conn.commit()
         logger.info(f"av项富化: {old_item_id} -> {new_item_id}")
@@ -503,6 +534,9 @@ class Database:
 
     async def set_level(self, item_id: str, level: int):
         """修改监测级别"""
+        if level == 0 and await self.is_never_archive(item_id):
+            logger.info(f"冻结项跳过 L0（never_archive）: {item_id}")
+            return
         await self._conn.execute(
             "UPDATE monitored_items SET monitor_level = ? WHERE item_id = ?",
             (level, item_id)
@@ -586,13 +620,52 @@ class Database:
         row = await self._conn.execute_fetchall(sql, tuple(params))
         return dict(row[0]) if row else None
 
+    async def add_never_archive(self, item_id: str, rpid: str = "",
+                                reason: str = "", since: str = "") -> None:
+        """冻结条目：archive_stale 和基线级联清理都跳过它"""
+        if not item_id:
+            return
+        await self._conn.execute(
+            "INSERT OR IGNORE INTO never_archive(item_id, rpid, reason, since) "
+            "VALUES (?, ?, ?, ?)",
+            (item_id, rpid or "", reason or "", since or ""),
+        )
+        await self._conn.commit()
+
+    async def is_never_archive(self, item_id: str) -> bool:
+        """判断 item 是否在冻结表里"""
+        rows = await self._conn.execute_fetchall(
+            "SELECT 1 FROM never_archive WHERE item_id = ? LIMIT 1", (item_id,)
+        )
+        return bool(rows)
+
+    async def get_item_id_by_comment_id(self, comment_id: str) -> Optional[str]:
+        """按 comment_id 反查 item_id（置顶游标只带 rpid，不带动态 ID 时用）"""
+        rows = await self._conn.execute_fetchall(
+            "SELECT item_id FROM interactions WHERE comment_id = ? LIMIT 1",
+            (comment_id,)
+        )
+        return rows[0]["item_id"] if rows else None
+
+    async def get_notified_since(self, hours: int = 48, limit: int = 500) -> list:
+        """取最近 N 小时已通知的互动，供手动补档"""
+        cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        rows = await self._conn.execute_fetchall(
+            "SELECT * FROM interactions "
+            "WHERE (notified_immediate = 1 OR notified_digest = 1) "
+            "AND discovered_at >= ? ORDER BY discovered_at ASC LIMIT ?",
+            (cutoff, limit),
+        )
+        return [dict(r) for r in rows]
+
     async def archive_stale(self, hours_threshold: int) -> int:
         """归档超时的监测项（Level > 0 设为 Level 0），返回归档数量"""
         cutoff = (datetime.now() - timedelta(hours=hours_threshold)).strftime("%Y-%m-%d %H:%M:%S")
-        # 仅归档非优先项；先查出受影响 item（供基线级联清理用）
+        # 仅归档非优先项；never_archive 里的历史置顶永久跳过
         rows = await self._conn.execute_fetchall(
             "SELECT item_id FROM monitored_items "
-            "WHERE monitor_level > 0 AND is_priority = 0 AND first_seen_at < ?",
+            "WHERE monitor_level > 0 AND is_priority = 0 AND first_seen_at < ? "
+            "AND item_id NOT IN (SELECT item_id FROM never_archive)",
             (cutoff,)
         )
         item_ids = [r["item_id"] for r in rows]
@@ -600,7 +673,8 @@ class Database:
             return 0
         cursor = await self._conn.execute(
             "UPDATE monitored_items SET monitor_level = 0 "
-            "WHERE monitor_level > 0 AND is_priority = 0 AND first_seen_at < ?",
+            "WHERE monitor_level > 0 AND is_priority = 0 AND first_seen_at < ? "
+            "AND item_id NOT IN (SELECT item_id FROM never_archive)",
             (cutoff,)
         )
         # 归档即不再轮询（L0 不可逆）：级联删除其子评论基线，

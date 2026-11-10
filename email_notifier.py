@@ -225,7 +225,7 @@ def random_theme() -> dict:
 def _resolve_aid(item_id: str, aid: str) -> str:
     """
     解析真实 aid：优先取 comment_oid 传入值；
-    缺省时剥 item_id 的 av 前缀（空间动态 API 风控降级路径的产物，如 av117032272005640）。
+    缺省时剥 item_id 的 av 前缀（空间动态 API 风控降级路径的产物，如 av123456789012）。
     """
     if aid:
         return aid
@@ -563,6 +563,12 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
     priority_badge_html = (
         f'<span class="badge">{html.escape(priority_badge_text)}</span>' if is_priority else ""
     )
+    # priority 是“事件视角”，置顶快照是“快照视角”；邮件侧不合并，只提示去哪儿看快照
+    priority_note_html = (
+        '<div style="margin-top:8px;color:#999;font-size:12px;">'
+        '本条即当前置顶评论 · 快照见置顶归档</div>'
+        if is_priority else ""
+    )
 
     # 渲染评论内容（文字+表情+图片），前加【发送者昵称】标签（2026-09-04 统一）：
     # 一律用真实评论发送者昵称（uname 入库为 comment_author）——
@@ -592,6 +598,7 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
         </div>
         <div class="interaction">
             <span class="badge">{reply_type}</span>{priority_badge_html}{like_html}
+            {priority_note_html}
             {post_context_html}
             {context_html}
             <div class="text">{up_tag}{content_html}</div>
@@ -828,9 +835,20 @@ def _send_email_sync(subject: str, html: str, config) -> bool:
 class Notifier:
     """邮件通知管理"""
 
-    def __init__(self, config: Config, db: Database):
+    def __init__(self, config: Config, db: Database, archive=None):
         self.config = config
         self.db = db
+        self.arch = archive
+
+    async def _archive_many(self, interactions: list) -> None:
+        """邮件发送成功后归档；任何异常都不影响推送"""
+        if not self.arch:
+            return
+        for interaction in interactions:
+            try:
+                await self.arch.enqueue(interaction)
+            except Exception as e:
+                logger.warning(f"归档入队失败（不影响邮件）: {e}")
 
     async def send_immediate(self, interaction: dict, up_name: str, item_type: str = "", is_priority: bool = False):
         """即时发送单条互动邮件（is_priority 用"置顶动态有更新"标题）"""
@@ -869,6 +887,7 @@ class Notifier:
             # 认领时已置 notified_immediate=1（原子），无需再标记
             cid = interaction.get("comment_id", "")[:30]
             logger.info(f"即时邮件已发送: comment_id={cid}...")
+            await self._archive_many([interaction])
             # 留档
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             _archive_email(f"{ts}_immediate_{cid}.html", html)
@@ -1011,6 +1030,7 @@ class Notifier:
             ids = [i["id"] for i in interactions]
             await self.db.mark_notified_immediate(ids)
             logger.info(f"场景二批量邮件已发送: {len(interactions)} 条互动")
+            await self._archive_many(interactions)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             _archive_email(f"{ts}_scene2_batch_{len(interactions)}条.html", html)
         else:
@@ -1058,6 +1078,7 @@ class Notifier:
             ids = [i["id"] for i in interactions]
             await self.db.mark_notified_immediate(ids)
             logger.info(f"场景三批量邮件已发送: {len(interactions)} 条互动")
+            await self._archive_many(interactions)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             _archive_email(f"{ts}_scene3_batch_{len(interactions)}条.html", html)
         else:
@@ -1105,6 +1126,7 @@ class Notifier:
             ids = [i["id"] for i in interactions]
             await self.db.mark_notified_immediate(ids)
             logger.info(f"场景四批量邮件已发送: {len(interactions)} 条互动")
+            await self._archive_many(interactions)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             _archive_email(f"{ts}_scene4_batch_{len(interactions)}条.html", html)
         else:
@@ -1166,6 +1188,7 @@ class Notifier:
             ids = [i["id"] for i in subs]
             await self.db.mark_notified_immediate(ids)
             logger.info(f"priority子评论批量邮件已发送: {len(subs)} 条互动")
+            await self._archive_many(subs)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             _archive_email(f"{ts}_priority_sub_batch_{len(subs)}条.html", html)
         else:
@@ -1221,6 +1244,7 @@ class Notifier:
             ids = [i["id"] for i in interactions]
             await self.db.mark_notified_digest(ids)
             logger.info(f"日报已发送: {len(interactions)} 条互动")
+            await self._archive_many(interactions)
             # 留档
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             _archive_email(f"{ts}_digest_{len(interactions)}条.html", html)
@@ -1258,7 +1282,7 @@ async def _test():
         "id": 999,
         "up_uid": "000000000",
         "item_id": "999888777000111222",
-        "comment_id": "306073249233",
+        "comment_id": "111222333444",
         "is_sub_reply": False,
         "parent_content": "",
         "parent_author": "",
@@ -1277,7 +1301,7 @@ async def _test():
         "id": 1000,
         "up_uid": "000000000",
         "item_id": "999888777000111222",
-        "comment_id": "309143024560",
+        "comment_id": "111222333445",
         "is_sub_reply": True,
         "parent_content": "UP主今天好可爱！",
         "parent_author": "粉丝小A",
@@ -1313,7 +1337,7 @@ async def _test():
         "id": 1001,
         "up_uid": "000000000",
         "item_id": "999888777000111222",
-        "comment_id": "309143024561",
+        "comment_id": "111222333446",
         "is_sub_reply": False,
         "parent_content": "",
         "parent_author": "",

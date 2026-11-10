@@ -5,12 +5,22 @@
 import asyncio
 import signal
 import sys
+from pathlib import Path
 
 from bili_client import BiliClient
 from config import Config
 from database import Database
-from email_notifier import Notifier
 from logger_config import logger, setup_logging
+
+try:
+    from echowatch_archive import ArchiveConfig, EchoArchive
+    ARCHIVE_AVAILABLE = True
+except Exception as _archive_import_error:
+    ArchiveConfig = None
+    EchoArchive = None
+    ARCHIVE_AVAILABLE = False
+
+from email_notifier import Notifier
 from monitor_scene1 import Scene1Monitor
 from monitor_scene2 import Scene2Monitor
 from monitor_scene3 import Scene3Monitor
@@ -42,6 +52,30 @@ async def main():
     # ----------------------------------------------------------
     db = await Database(config.database.path).initialize()
     logger.info(f"数据库: {config.database.path}")
+
+    # ----------------------------------------------------------
+    # 3.5 初始化 GitHub 互动归档（失败不阻塞监控）
+    # ----------------------------------------------------------
+    archive = None
+    if not ARCHIVE_AVAILABLE:
+        logger.warning("GitHub 归档模块不可用（缺少依赖或导入失败），跳过归档")
+    else:
+        try:
+            archive_cfg = ArchiveConfig.load(
+                config.github_archive,
+                base_dir=Path(config_path).resolve().parent,
+            )
+            archive = EchoArchive(archive_cfg, db)
+            if archive.enabled:
+                logger.info(
+                    f"GitHub 归档已启用 (dry_run={archive_cfg.dry_run}, "
+                    f"repo={archive_cfg.owner}/{archive_cfg.repo})"
+                )
+            else:
+                logger.info("GitHub 归档未启用")
+        except Exception as e:
+            logger.error(f"归档初始化失败，监控继续运行: {e}")
+            archive = None
 
     # ----------------------------------------------------------
     # 4. 初始化 B站 API 客户端（零Cookie，纯公开API+WBI签名）
@@ -96,13 +130,14 @@ async def main():
     # ----------------------------------------------------------
     # 7. 初始化各模块
     # ----------------------------------------------------------
-    notifier = Notifier(config, db)
+    notifier = Notifier(config, db, archive=archive)
     scene1 = Scene1Monitor(db, client, config, notifier, screenshotter)
     scene2 = Scene2Monitor(db, client, config, screenshotter)
     scene3 = Scene3Monitor(db, client, config, screenshotter)
     scene4 = Scene4Monitor(db, client, config, screenshotter)
 
-    scheduler = Scheduler(config, db, client, scene1, scene2, scene3, scene4, notifier, screenshotter)
+    scheduler = Scheduler(config, db, client, scene1, scene2, scene3, scene4,
+                          notifier, screenshotter, archive=archive)
 
     # ----------------------------------------------------------
     # 8. 打印配置摘要

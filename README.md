@@ -1,4 +1,4 @@
-# EchoWatch（留声）v2.4
+# EchoWatch（留声）v2.7
 
 B站 UP主 互动监测系统 —— 实时发现 UP主 在评论区中的互动行为，通过邮件推送通知。
 
@@ -44,6 +44,22 @@ B站 UP主 互动监测系统 —— 实时发现 UP主 在评论区中的互动
 
 - 日报是每天的最后一道全量汇总，**包含所有已即时/已批量发送过的互动**，不遗漏
 - Priority 子评论批量间隔由 `priority_sub_batch_seconds` 配置（默认 180 秒）
+
+### GitHub 互动归档（v2.7）
+
+- 邮件发送成功后，把互动自动归档到与通知归档共用的**私有仓**，形成全息时间线
+- 只写 `comments/`、`pinned/_thread/`，以及根 README 归档索引里的「粉丝互动」月份；
+  不碰 `dynamics/`、`live/` 和其他索引分类
+- 互动按月份归档：`comments/YYYY-MM.md` + `.csv`，与其他归档分组的月度结构一致；
+  每次归档后即时刷新根 README 的粉丝互动月份列表
+- 置顶重叠以通知归档写的 `_state/pinned_cursor.json` 为准：
+  `rpid == pinned_rpid` 的正文只进 `pinned/_thread/`，`comments/` 只留指针
+- 幂等键 `interactions.comment_id`；账本 `comments/_state/archived_rpids.json`
+- 提交通道 Git Data API，署名 `echowatch-bot`；默认 `DRY_RUN=true`，只写
+  `data/archive_preview/`，验证后再提交 GitHub
+- 配置：`cp config_github.example.py config_github.py`，填入新开的 fine-grained PAT
+  （只授该私有仓 `Contents: R/W`）；`config_github.py` 已在 `.gitignore`
+- 手动补档：`python echowatch_archive.py --backfill-hours 48 --limit 500`
 
 ## 快速开始
 
@@ -155,10 +171,14 @@ echowatch/
 ├── monitor_scene4.py           # 场景四：其他UP动态评论区监测（目标UP主回复）
 ├── scheduler.py                # 任务调度器
 ├── email_notifier.py           # 邮件通知（富媒体渲染 + 随机主题）
+├── echowatch_archive.py        # GitHub 互动归档（v2.7：GitData/队列/置顶路由/月归档）
 ├── screenshotter.py            # Playwright 截图（场景原帖，元素级卡片）
 ├── pinned_dynamic_monitor.py   # 置顶动态自动发现与变更检测
 ├── logger_config.py            # 日志系统（logs/目录+轮转+3天清理）
 ├── retry_decorator.py          # 重试装饰器
+├── config_github.example.py    # GitHub 归档配置模板
+├── tests/
+│   └── test_archive.py         # 归档离线测试（DRY_RUN）
 ├── requirements.txt            # 依赖清单
 ├── CHANGELOG.md                # 版本更新记录
 ├── bili-api-guide.md           # B站 API 速查表
@@ -180,6 +200,9 @@ MIT
 
 | 版本 | 日期 | 更新内容 |
 |------|------|---------|
+| v2.7 | 2026-11-10 | 互动归档改为按月，与其他归档分组一致 |
+| v2.6 | 2026-11-10 | 根 README 粉丝互动按月索引 |
+| v2.5 | 2026-11-10 | GitHub 互动归档 + 置顶旁注 |
 | v2.4 | 2026-09-29 | 邮件主题配色随机性优化（放宽色域+主色去重） |
 | v2.3 | 2026-09-05 | 评论徽章改发送者昵称+av降级项自动富化动态ID |
 | v2.2 | 2026-09-04 | priority 通知卡片徽章（文案可配置） |

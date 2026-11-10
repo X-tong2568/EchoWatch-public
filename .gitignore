@@ -19,6 +19,10 @@ TODO.md
 
 # 配置文件（含敏感信息）
 config.yaml
+config_github.py
+
+# 归档本地预览（DRY_RUN 产物）
+data/archive_preview/
 
 # Cookie（B站登录凭证）
 cookies.json

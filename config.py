@@ -187,6 +187,8 @@ class Config:
         self.database = DatabaseConfig(**raw.get("database", {}))
         self.screenshot = ScreenshotConfig(**raw.get("screenshot", {}))
         self.logging = LoggingConfig(**raw.get("logging", {}))
+        # GitHub 归档（v2.5）：保持字典原样，由 echowatch_archive.ArchiveConfig 解析
+        self.github_archive = raw.get("github_archive", {}) or {}
 
         # 数据库路径：相对路径基于 config.yaml 所在目录解析
         db_path = Path(self.database.path)

@@ -37,6 +37,7 @@ class Scheduler:
         scene4: Scene4Monitor,
         notifier: Notifier,
         screenshotter=None,
+        archive=None,
     ):
         self.config = config
         self.db = db
@@ -47,6 +48,7 @@ class Scheduler:
         self.scene4 = scene4
         self.notifier = notifier
         self.screenshotter = screenshotter  # 截图失败补截用（发送前兜底）
+        self.arch = archive
 
         self.running = True
         self._digest_sent_today = False  # 防止同一天重复发日报
@@ -101,6 +103,9 @@ class Scheduler:
         tasks.append(asyncio.create_task(self._daily_digest_loop()))
         tasks.append(asyncio.create_task(self._immediate_notify_loop()))
         tasks.append(asyncio.create_task(self._archive_cleanup_loop()))
+        if self.arch and self.arch.enabled:
+            tasks.append(asyncio.create_task(self._archive_flush_loop()))
+            logger.info("GitHub 互动归档 flush 循环已启动")
         # 注：v2.0 起截图时机改为"推送时按需补截"（_retry_screenshot_before_send），
         # 入库即截/待补截标记机制（screenshot_pending）已废弃，补截循环随之删除
         logger.info("通用调度任务已启动 (归档+日报+场景一即时通知+留档清理)")
@@ -119,6 +124,12 @@ class Scheduler:
         调用方应在关闭数据库/HTTP会话之前调用，避免任务访问已关闭资源。
         """
         self.running = False
+        # 退出前最后 flush 一次；失败只记日志，不阻塞关闭
+        if self.arch and self.arch.enabled:
+            try:
+                await self.arch.flush("shutdown")
+            except Exception as e:
+                logger.error(f"退出前归档 flush 失败: {e}")
         for task in self._tasks:
             if not task.done():
                 task.cancel()
@@ -613,6 +624,17 @@ class Scheduler:
                     await self.notifier.send_scene4_batch(up_name)
             except Exception as e:
                 logger.error(f"场景四批量通知异常: {e}")
+            await asyncio.sleep(interval)
+
+    async def _archive_flush_loop(self):
+        """GitHub 互动归档循环：每 flush_seconds 把队列写进归档仓"""
+        interval = max(30, int(self.arch.cfg.flush_seconds))
+        logger.info(f"互动归档 flush 循环: 每 {interval}s 执行")
+        while self.running:
+            try:
+                await self.arch.flush("timer")
+            except Exception as e:
+                logger.error(f"互动归档 flush 异常: {e}")
             await asyncio.sleep(interval)
 
     async def _archive_cleanup_loop(self):
