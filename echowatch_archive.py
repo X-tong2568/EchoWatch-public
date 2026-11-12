@@ -99,8 +99,9 @@ class ArchiveConfig:
     anonymize_nick: bool = False
     never_archive_pinned: bool = True
     flush_seconds: int = 180
-    author_name: str = "echowatch-bot"
-    author_email: str = "echowatch@users.noreply.github.com"
+    # 默认用不关联任何 GitHub 账号的占位署名；真实身份在 config_github.py 覆盖
+    author_name: str = "EchoWatch Archive"
+    author_email: str = "archive@local"
     max_queue: int = 2000
     screenshot_dir: str = "sent_emails"
     preview_dir: str = "data/archive_preview"
@@ -129,7 +130,8 @@ class ArchiveConfig:
                     "GITHUB_ARCHIVE_REPO", "GITHUB_ARCHIVE_BRANCH",
                     "GITHUB_ARCHIVE_TOKEN", "GITHUB_ARCHIVE_TIMEOUT",
                     "GITHUB_ARCHIVE_DRY_RUN", "GITHUB_ARCHIVE_IMAGE_MAX_SIZE",
-                    "GITHUB_ARCHIVE_WEBP_QUALITY",
+                    "GITHUB_ARCHIVE_WEBP_QUALITY", "GITHUB_ARCHIVE_AUTHOR_NAME",
+                    "GITHUB_ARCHIVE_AUTHOR_EMAIL",
                 ):
                     if hasattr(module, name):
                         setattr(cfg, _config_field(name), getattr(module, name))
@@ -158,6 +160,8 @@ class ArchiveConfig:
             "GITHUB_ARCHIVE_DRY_RUN": "dry_run",
             "GITHUB_ARCHIVE_IMAGE_MAX_SIZE": "image_max_size",
             "GITHUB_ARCHIVE_WEBP_QUALITY": "webp_quality",
+            "GITHUB_ARCHIVE_AUTHOR_NAME": "author_name",
+            "GITHUB_ARCHIVE_AUTHOR_EMAIL": "author_email",
             "ARCHIVE_ANONYMIZE_NICK": "anonymize_nick",
             "ARCHIVE_NEVER_ARCHIVE_PINNED": "never_archive_pinned",
             "ARCHIVE_FLUSH_SECONDS": "flush_seconds",
@@ -343,10 +347,12 @@ class GitDataWriter:
         }
 
     def _api(self, method: str, path: str, allow_404: bool = False,
+             accept: str = "application/vnd.github+json",
              **kwargs) -> Optional[requests.Response]:
+        # accept 必须并入请求头；透传给 requests.request 会因未知关键字报错
         try:
             resp = requests.request(
-                method, f"{self.API}{path}", headers=self._headers(),
+                method, f"{self.API}{path}", headers=self._headers(accept),
                 timeout=self.cfg.timeout, **kwargs
             )
         except Exception as e:
@@ -631,6 +637,14 @@ class EchoArchive:
     # flush
     # --------------------------------------------------------
 
+    async def _get_priority_item_ids(self) -> Set[str]:
+        """取当前 priority 监测项 ID；读取失败按空集合处理"""
+        try:
+            return set(await self.db.get_priority_item_ids())
+        except Exception as e:
+            logger.warning(f"读取 priority 监测项失败，按无 priority 处理: {e}")
+            return set()
+
     async def flush(self, reason: str = "timer") -> bool:
         """把队列写进归档仓；失败保留队列，下次重试"""
         if not self.enabled or not self._queue:
@@ -643,6 +657,7 @@ class EchoArchive:
             if not pending:
                 return True
 
+            priority_ids = await self._get_priority_item_ids()
             backoff = [0.8, 1.6, 3.2]
             for attempt in range(4):
                 try:
@@ -650,7 +665,7 @@ class EchoArchive:
                     cursor = await self._get_cursor(base)
                     await self._freeze_pinned(cursor)
                     files, new_ids = await asyncio.to_thread(
-                        self._build_files, base, pending, cursor
+                        self._build_files, base, pending, cursor, priority_ids
                     )
                     if not files:
                         self._mark_archived(pending)
@@ -699,16 +714,20 @@ class EchoArchive:
     # --------------------------------------------------------
 
     def _build_files(self, base: RepoBase, pending: List[dict],
-                     cursor: dict) -> Tuple[Dict[str, bytes], Set[str]]:
+                     cursor: dict,
+                     priority_ids: Optional[Set[str]] = None
+                     ) -> Tuple[Dict[str, bytes], Set[str]]:
         """在 base 快照上重建受影响的月文件，返回待提交文件"""
         pinned_rpid = str(cursor.get("pinned_rpid") or "")
         prev_rpid = str(cursor.get("prev_rpid") or "")
         pinned_dyn = str(cursor.get("pinned_dynamic_id") or "")
         pinned_since = str(cursor.get("since") or "")
+        priority_ids = priority_ids or set()
 
         files: Dict[str, bytes] = {}
         emoji_assets: Dict[str, bytes] = {}
         new_ids: Set[str] = set()
+        skipped: Set[str] = set()
         comments_by_month: Dict[str, List[dict]] = defaultdict(list)
         thread_by_day: Dict[str, List[dict]] = defaultdict(list)
 
@@ -719,60 +738,48 @@ class EchoArchive:
             item_id = str(item.get("item_id") or "")
             day = _entry_day(item)
             month = day[:7]
-            is_like = rpid.endswith("_like")
-            route = "normal"
 
-            if rpid == pinned_rpid:
-                route = "pinned_body"
-            elif rpid == prev_rpid:
-                # 刚被换下的旧置顶优先于“同帖旁路”标记，保留“曾是置顶”语义
-                route = "prev_pinned"
-            elif pinned_rpid and item_id == pinned_dyn:
-                # 游标刚切换、还没拿到 pinned_rpid 时先按普通互动处理，
-                # 等 rpid 到位后由 _migrate_recent 搬到 thread，避免误判成回响
-                route = "pinned_echo"
+            # “置顶动态有更新”的主评论由通知归档负责，EchoWatch 跳过；
+            # 置顶动态的子评论（置顶动态子评论汇总）仍正常归档
+            if item_id in priority_ids and not item.get("is_sub_reply"):
+                skipped.add(rpid)
+                continue
+            # 兜底：当前/上一任置顶评论本体也不归档（游标可能领先于 priority 标记）
+            if pinned_rpid and rpid in (pinned_rpid, prev_rpid):
+                skipped.add(rpid)
+                continue
 
+            # 置顶动态下的其他互动（子评论、UP觉得很赞等）仍归档，并在 thread 记一行回响
+            route = "pinned_echo" if (pinned_rpid and item_id == pinned_dyn) else "normal"
             rendered = self._render_entry(
                 item, route, cursor, pinned_since,
-                dest="thread" if route == "pinned_body" else "comments",
-                base=base, assets=emoji_assets,
+                dest="comments", base=base, assets=emoji_assets,
             )
-            if route == "pinned_body":
+            comments_by_month[month].append({
+                "rpid": rpid,
+                "pointer": False,
+                "md": rendered["md"],
+                "csv": rendered["csv"],
+                "time": item.get("discovered_at", ""),
+            })
+            if route == "pinned_echo":
                 thread_by_day[day].append({
-                    "kind": "body",
+                    "kind": "echo",
                     "rpid": rpid,
-                    "md": rendered["md"],
+                    "pinned_rpid": pinned_rpid,
+                    "line": self._render_echo(item, route, cursor),
                     "time": item.get("discovered_at", ""),
                 })
-                comments_by_month[month].append({
-                    "rpid": rpid,
-                    "pointer": True,
-                    "relative": f"pinned/_thread/{day}.md",
-                    "time": item.get("discovered_at", ""),
-                    "csv": rendered["csv"],
-                })
-            else:
-                comments_by_month[month].append({
-                    "rpid": rpid,
-                    "pointer": False,
-                    "md": rendered["md"],
-                    "csv": rendered["csv"],
-                    "time": item.get("discovered_at", ""),
-                })
-                if route in ("pinned_echo", "prev_pinned"):
-                    thread_by_day[day].append({
-                        "kind": "echo",
-                        "rpid": rpid,
-                        "pinned_rpid": pinned_rpid,
-                        "line": self._render_echo(item, route, cursor),
-                        "time": item.get("discovered_at", ""),
-                    })
             new_ids.add(rpid)
 
-        # 把最近两个月 comments 里已是当前置顶的正文搬进 thread（切换竞态兜底）
-        overrides = self._migrate_recent(
-            base, pinned_rpid, comments_by_month, thread_by_day
+        # 切换竞态兜底：曾被按普通互动归档、现在成为当前/上一任置顶评论本体的块，
+        # 从 comments 月文件里删除（置顶本体由通知归档负责，EchoWatch 不再保留）
+        overrides, removed_ids = self._migrate_recent(
+            base, pinned_rpid, prev_rpid
         )
+        for md_path in overrides:
+            month = md_path[len("comments/"):-len(".md")]
+            comments_by_month.setdefault(month, [])
 
         # comments 月 MD + CSV（与空间归档一致：一个月一个文件）
         for month, entries in comments_by_month.items():
@@ -781,7 +788,7 @@ class EchoArchive:
             existing_md = overrides.get(md_path) or base.read(md_path) or _comments_md_header(month)
             existing_csv = base.read(csv_path) or "﻿" + ",".join(CSV_FIELDS) + "\n"
             new_md, new_csv = _merge_comments(
-                existing_md, existing_csv, entries, self.cfg, month
+                existing_md, existing_csv, entries, self.cfg, month, removed_ids
             )
             if new_md != existing_md:
                 files[md_path] = new_md.encode("utf-8")
@@ -796,10 +803,11 @@ class EchoArchive:
             if new_text != existing:
                 files[path] = new_text.encode("utf-8")
 
-        # 图片
+        # 图片（跳过不归档的 priority 主评论和置顶本体）
         for item in pending:
             rpid = str(item.get("comment_id") or "")
-            if not rpid or rpid in self._archived_ids or rpid.endswith("_like"):
+            if (not rpid or rpid in self._archived_ids
+                    or rpid in skipped or rpid.endswith("_like")):
                 continue
             image = self._build_image(item)
             if image:
@@ -839,41 +847,34 @@ class EchoArchive:
         return files, new_ids
 
     def _migrate_recent(self, base: RepoBase, pinned_rpid: str,
-                        comments_by_month: Dict[str, List[dict]],
-                        thread_by_day: Dict[str, List[dict]]) -> Dict[str, str]:
+                        prev_rpid: str) -> Tuple[Dict[str, str], Set[str]]:
         """
-        切换竞态兜底：扫描最近两个月 comments MD，发现某条 rpid 现在 == pinned_rpid，
-        把正文搬到 thread，comments 只留指针。只处理还没被搬过的块。
-        返回被改写的 comments MD 内容，供后续合并使用。
+        切换竞态兜底：扫描最近两个月 comments MD，发现当前/上一任置顶评论本体
+        曾被按普通互动归档，则从月文件里删除（置顶本体由通知归档负责）。
+        返回 (被改写的 comments MD 内容, 被删除的 rpid 集合)。
         """
         overrides: Dict[str, str] = {}
-        if not pinned_rpid:
-            return overrides
+        removed_ids: Set[str] = set()
+        targets = [x for x in (pinned_rpid, prev_rpid) if x]
+        if not targets:
+            return overrides, removed_ids
         current = datetime.now().strftime("%Y-%m")
         for month in (current, _prev_month(current)):
             md_path = f"comments/{month}.md"
             text = overrides.get(md_path) or base.read(md_path)
             if not text:
                 continue
-            moved = _extract_rpid_block(text, pinned_rpid)
-            if not moved:
-                continue
-            body, new_text = moved
-            overrides[md_path] = new_text
-            day = _block_day(body) or datetime.now().strftime("%Y-%m-%d")
-            thread_by_day[day].append({
-                "kind": "body",
-                "rpid": pinned_rpid,
-                "md": body,
-                "time": "",
-            })
-            comments_by_month.setdefault(month, []).append({
-                "rpid": pinned_rpid,
-                "pointer": True,
-                "relative": f"pinned/_thread/{day}.md",
-                "time": "",
-            })
-        return overrides
+            for rpid in targets:
+                if rpid in removed_ids:
+                    continue
+                moved = _extract_rpid_block(text, rpid, keep_pointer=False)
+                if not moved:
+                    continue
+                _body, text = moved
+                overrides[md_path] = text
+                removed_ids.add(rpid)
+                logger.info(f"置顶评论本体移出 EchoWatch 归档: rpid={rpid}")
+        return overrides, removed_ids
 
     def _build_image(self, item: dict) -> Optional[Tuple[str, bytes]]:
         """把 sent_emails/dynamic_{item_id}.jpeg 转成 {rpid}.webp"""
@@ -922,9 +923,6 @@ class EchoArchive:
             tags.append("`UP觉得很赞`")
         if priority:
             tags.append("`优先`")
-        if route == "prev_pinned":
-            prev_since = str(cursor.get("prev_since") or "")
-            tags.append(f"`曾是置顶({esc_md(prev_since)}起)`")
 
         lines = [f"<!-- ew:rpid:{rpid} -->"]
         lines.append(f"### {esc_md(item.get('discovered_at', ''))} · {' '.join(tags)}")
@@ -1113,12 +1111,6 @@ def _prev_month(month: str) -> str:
     return f"{year}-{mon - 1:02d}"
 
 
-def _block_day(block: str) -> str:
-    """从事件块标题里取日期"""
-    match = re.search(r"^### (\d{4}-\d{2}-\d{2})", block, re.M)
-    return match.group(1) if match else ""
-
-
 def _comments_md_header(month: str) -> str:
     """与空间归档一致的月文件头（表格由 _merge_comments 重建）"""
     return (
@@ -1199,11 +1191,16 @@ def _clip(text: str, limit: int = 40) -> str:
 
 def _merge_comments(existing_md: str, existing_csv: str,
                     entries: List[dict], cfg: ArchiveConfig,
-                    month: str) -> Tuple[str, str]:
+                    month: str,
+                    removed_ids: Optional[Set[str]] = None) -> Tuple[str, str]:
     """把新条目合并进 comments 月 MD/CSV，按 rpid 去重，重建表头"""
+    removed_ids = removed_ids or set()
     rows = list(csv.DictReader(io.StringIO(existing_csv.lstrip("﻿")))) if existing_csv.strip() else []
-    existing_ids = {r.get("rpid") for r in rows if r.get("rpid")}
     blocks = _split_md_sections(existing_md)
+    if removed_ids:
+        rows = [r for r in rows if r.get("rpid") not in removed_ids]
+        blocks = [b for b in blocks if _block_key(b)[0] not in removed_ids]
+    existing_ids = {r.get("rpid") for r in rows if r.get("rpid")}
     block_ids = {_block_key(block)[0] for block in blocks if _block_key(block)[0]}
 
     for entry in entries:
@@ -1285,8 +1282,9 @@ def _merge_comments(existing_md: str, existing_csv: str,
     return md, "﻿" + out.getvalue()
 
 
-def _extract_rpid_block(text: str, rpid: str) -> Optional[Tuple[str, str]]:
-    """从 comments MD 里取出某个 rpid 的正文块，并把原位置换成指针"""
+def _extract_rpid_block(text: str, rpid: str,
+                        keep_pointer: bool = True) -> Optional[Tuple[str, str]]:
+    """从 comments MD 里取出某个 rpid 的正文块；keep_pointer=False 时直接删除"""
     marker = f"<!-- ew:rpid:{rpid} -->"
     start = text.find(marker)
     if start == -1:
@@ -1296,10 +1294,12 @@ def _extract_rpid_block(text: str, rpid: str) -> Optional[Tuple[str, str]]:
     while end > start and text[end - 1] in "\r\n":
         end -= 1
     body = text[start:end].strip()
-    pointer = (
-        f"<!-- ew:pointer:{rpid} -->\n"
-        f"> ↗ 已并入 pinned/_thread/（本条即当期置顶评论本体）\n"
-    )
+    pointer = ""
+    if keep_pointer:
+        pointer = (
+            f"<!-- ew:pointer:{rpid} -->\n"
+            f"> ↗ 已并入 pinned/_thread/（本条即当期置顶评论本体）\n"
+        )
     return body, (text[:start] + pointer + text[end:])
 
 

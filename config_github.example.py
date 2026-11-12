@@ -28,3 +28,9 @@ GITHUB_ARCHIVE_WEBP_QUALITY = 80
 ARCHIVE_ANONYMIZE_NICK = False       # True=昵称哈希成 粉丝#abcd
 ARCHIVE_NEVER_ARCHIVE_PINNED = True  # 冻结历史置顶，防 L0 级联清理
 ARCHIVE_FLUSH_SECONDS = 180          # flush 间隔（秒）
+
+# 归档提交署名（可选）
+# 默认 "EchoWatch Archive <archive@local>"，不关联任何 GitHub 账号；
+# 想计入个人贡献图，填入 GitHub 账号已验证的用户名和邮箱
+# GITHUB_ARCHIVE_AUTHOR_NAME = "your-github-username"
+# GITHUB_ARCHIVE_AUTHOR_EMAIL = "your-verified-email@example.com"

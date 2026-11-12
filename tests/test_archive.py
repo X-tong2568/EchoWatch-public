@@ -10,17 +10,21 @@ import unittest
 from pathlib import Path
 
 from database import Database
-from echowatch_archive import ArchiveConfig, EchoArchive, build_url
+from echowatch_archive import ArchiveConfig, EchoArchive, GitDataWriter, build_url
 
 
 class FakeDB:
     """归档模块只需要这几个 DB 方法"""
 
-    def __init__(self):
+    def __init__(self, priority_ids=None):
         self.frozen = []
+        self.priority_ids = priority_ids or set()
 
     async def add_never_archive(self, item_id, rpid="", reason="", since=""):
         self.frozen.append((item_id, rpid, reason, since))
+
+    async def get_priority_item_ids(self):
+        return self.priority_ids
 
     async def get_item_id_by_comment_id(self, comment_id):
         return "D1" if str(comment_id).startswith("10") else "D2"
@@ -208,7 +212,8 @@ class ArchiveTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/read/cv123", build_url("123", "DYNAMIC_TYPE_ARTICLE", "", "1"))
         self.assertIn("t.bilibili.com/456", build_url("456", "DYNAMIC_TYPE_DRAW", "", "1"))
 
-    async def test_pinned_body_pointer_and_thread(self):
+    async def test_pinned_body_not_archived(self):
+        """置顶评论本体（当前 + 上一任）由通知归档负责，EchoWatch 不重复归档"""
         cursor = {
             "pinned_dynamic_id": "D1",
             "pinned_rpid": "100",
@@ -218,15 +223,36 @@ class ArchiveTest(unittest.IsolatedAsyncioTestCase):
         }
         arch = self.make_archive(cursor=cursor)
         await arch.enqueue(make_item("100", content="pinned body"))
-        await arch.flush("pinned")
+        await arch.enqueue(make_item(
+            "099", content="prev pinned body", discovered_at="2026-11-11 10:00:00"
+        ))
+        self.assertTrue(await arch.flush("pinned"))
+        root = Path(arch.cfg.preview_dir)
+        self.assertFalse((root / "comments/2026-11.md").exists())
+        self.assertFalse((root / "pinned/_thread/2026-11-10.md").exists())
+
+    async def test_priority_main_skipped_sub_archived(self):
+        """置顶动态有更新的主评论不归档；置顶动态子评论汇总仍归档"""
+        db = FakeDB(priority_ids={"D1"})
+        arch = self.make_archive(cursor={
+            "pinned_dynamic_id": "D1", "pinned_rpid": "100",
+        }, db=db)
+        await arch.enqueue(make_item("100", content="pinned body", item_id="D1"))
+        await arch.enqueue(make_item(
+            "101", content="sub reply", item_id="D1", is_sub_reply=1,
+            discovered_at="2026-11-10 13:00:00",
+        ))
+        self.assertTrue(await arch.flush("priority"))
         root = Path(arch.cfg.preview_dir)
         comments = (root / "comments/2026-11.md").read_text(encoding="utf-8")
         thread = (root / "pinned/_thread/2026-11-10.md").read_text(encoding="utf-8")
-        self.assertIn("<!-- ew:pointer:100 -->", comments)
         self.assertNotIn("<!-- ew:rpid:100 -->", comments)
-        self.assertIn("<!-- ew:rpid:100 -->", thread)
+        self.assertIn("<!-- ew:rpid:101 -->", comments)
+        self.assertNotIn("<!-- ew:rpid:100 -->", thread)
+        self.assertIn("<!-- ew:echo:101 -->", thread)
 
     async def test_switch_race_migration(self):
+        """曾按普通互动归档、后成为置顶本体的块，要从月文件和 CSV 里删掉"""
         arch = self.make_archive(cursor={
             "pinned_dynamic_id": "D1", "pinned_rpid": "", "since": "",
         })
@@ -246,10 +272,12 @@ class ArchiveTest(unittest.IsolatedAsyncioTestCase):
 
         root = Path(arch.cfg.preview_dir)
         comments = (root / "comments/2026-11.md").read_text(encoding="utf-8")
+        csv_text = (root / "comments/2026-11.csv").read_text(encoding="utf-8-sig")
         thread = (root / "pinned/_thread/2026-11-10.md").read_text(encoding="utf-8")
-        self.assertIn("<!-- ew:pointer:100 -->", comments)
         self.assertNotIn("<!-- ew:rpid:100 -->", comments)
-        self.assertIn("<!-- ew:rpid:100 -->", thread)
+        self.assertNotIn("<!-- ew:pointer:100 -->", comments)
+        self.assertNotIn("100", csv_text.splitlines()[1])  # 只剩 101 那一行
+        self.assertNotIn("<!-- ew:rpid:100 -->", thread)
         self.assertIn("<!-- ew:echo:101 -->", thread)
         self.assertNotIn("<!-- ew:echo:100 -->", thread)
 
@@ -306,7 +334,7 @@ class ArchiveTest(unittest.IsolatedAsyncioTestCase):
         await arch.flush("author")
         root = Path(arch.cfg.preview_dir)
         commit = json.loads((root / "_preview_commit.json").read_text(encoding="utf-8"))
-        self.assertIn("echowatch-bot", commit["author"])
+        self.assertIn("EchoWatch Archive", commit["author"])
         self.assertFalse((root / "README.md").exists())
         self.assertTrue((root / "comments/README.md").exists())
 
@@ -364,6 +392,22 @@ class NeverArchiveDBTest(unittest.IsolatedAsyncioTestCase):
             "SELECT item_id, rpid FROM never_archive"
         )
         self.assertEqual([(r["item_id"], r["rpid"]) for r in rows], [("999", "100")])
+
+
+class GitDataWriterTest(unittest.TestCase):
+    """GitHub 请求参数回归测试（不联网）"""
+
+    def test_raw_accept_goes_to_headers(self):
+        """读 blob 的 raw Accept 必须进请求头，不能透传给 requests"""
+        from unittest.mock import Mock, patch
+
+        cfg = ArchiveConfig(token="test-token", owner="o", repo="r")
+        writer = GitDataWriter(cfg)
+        resp = Mock(status_code=200)
+        with patch("echowatch_archive.requests.request", return_value=resp) as req:
+            writer._api("GET", "/x", accept="application/vnd.github.raw")
+        _, kwargs = req.call_args
+        self.assertEqual(kwargs["headers"]["Accept"], "application/vnd.github.raw")
 
 
 if __name__ == "__main__":

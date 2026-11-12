@@ -887,7 +887,9 @@ class Notifier:
             # 认领时已置 notified_immediate=1（原子），无需再标记
             cid = interaction.get("comment_id", "")[:30]
             logger.info(f"即时邮件已发送: comment_id={cid}...")
-            await self._archive_many([interaction])
+            if not is_priority:
+                # “置顶动态有更新”的主评论由通知归档负责，EchoWatch 不重复归档
+                await self._archive_many([interaction])
             # 留档
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             _archive_email(f"{ts}_immediate_{cid}.html", html)

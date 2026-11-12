@@ -1,4 +1,4 @@
-# EchoWatch（留声）v2.7
+# EchoWatch（留声）v2.8
 
 B站 UP主 互动监测系统 —— 实时发现 UP主 在评论区中的互动行为，通过邮件推送通知。
 
@@ -55,7 +55,8 @@ B站 UP主 互动监测系统 —— 实时发现 UP主 在评论区中的互动
 - 置顶重叠以通知归档写的 `_state/pinned_cursor.json` 为准：
   `rpid == pinned_rpid` 的正文只进 `pinned/_thread/`，`comments/` 只留指针
 - 幂等键 `interactions.comment_id`；账本 `comments/_state/archived_rpids.json`
-- 提交通道 Git Data API，署名 `echowatch-bot`；默认 `DRY_RUN=true`，只写
+- 提交通道 Git Data API，署名可在 `config_github.py` 配置（默认
+  `EchoWatch Archive <archive@local>`，不关联账号）；默认 `DRY_RUN=true`，只写
   `data/archive_preview/`，验证后再提交 GitHub
 - 配置：`cp config_github.example.py config_github.py`，填入新开的 fine-grained PAT
   （只授该私有仓 `Contents: R/W`）；`config_github.py` 已在 `.gitignore`
@@ -200,6 +201,7 @@ MIT
 
 | 版本 | 日期 | 更新内容 |
 |------|------|---------|
+| v2.8 | 2026-11-11 | 归档署名改为可配置 |
 | v2.7 | 2026-11-10 | 互动归档改为按月，与其他归档分组一致 |
 | v2.6 | 2026-11-10 | 根 README 粉丝互动按月索引 |
 | v2.5 | 2026-11-10 | GitHub 互动归档 + 置顶旁注 |

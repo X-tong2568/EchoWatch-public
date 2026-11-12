@@ -112,6 +112,9 @@ github_archive:
   anonymize_nick: false            # true=昵称哈希成 粉丝#abcd
   never_archive_pinned: true       # 冻结历史置顶，防 L0 级联清理
   flush_seconds: 180               # 归档 flush 间隔（秒）
+  # 可选：提交署名（默认 EchoWatch Archive <archive@local>，不关联账号）
+  # author_name: "your-github-username"
+  # author_email: "your-verified-email@example.com"
 
 # --- 数据库 ---
 database:

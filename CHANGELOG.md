@@ -1,3 +1,23 @@
+## v2.8 (2026-11-11) — 归档署名改为可配置
+
+### 变更
+
+- **署名可配置**：`ArchiveConfig` 的 `author_name` / `author_email` 支持从
+  `config_github.py`、`config.yaml` 的 `github_archive:` 段和环境变量覆盖
+- **安全默认值**：未配置时使用 `EchoWatch Archive <archive@local>`，不关联任何
+  GitHub 账号；避免 `用户名@users.noreply.github.com` 撞上真实账号、把提交算到无关用户头上
+- **文档**：README、`config_github.example.py`、`config.example.yaml` 同步说明
+
+### 修复
+
+- **归档账本读取失败**：GitHub 请求的 `accept` 参数改为并入请求头，修复
+  `unexpected keyword argument 'accept'` 导致每轮归档被跳过的问题
+- **置顶重复归档**：按邮件通道区分，「置顶动态有更新」的主评论不再归档（由通知归档负责），
+  置顶动态子评论汇总和话题互动汇总仍正常归档
+- **测试**：18 条离线测试通过
+
+AI-assisted: Claude Code (Anthropic)
+
 ## v2.7 (2026-11-10) — 互动归档改为按月
 
 ### 变更
