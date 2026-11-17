@@ -100,6 +100,24 @@ CREATE TABLE IF NOT EXISTS digest_state (
 )
 """
 
+# 子评论快照表：缓存翻页拿到的所有子评论正文，供「被回复的原评论」跨窗口回查。
+# B站子评论接口只返回 parent 的 rpid、不返回父评论正文；原实现只能从本次
+# 翻页窗口里找，窗口外的父评论在邮件里就成了空白。这里把每次翻页拿到的
+# 子评论顺手落库（INSERT OR IGNORE，零额外 API 请求），解析父评论时兜底。
+# 不覆盖已存在行：父评论被删除后，快照仍能保持引用完整。
+CREATE_SUB_COMMENT_CACHE = """
+CREATE TABLE IF NOT EXISTS sub_comment_cache (
+    rpid            TEXT PRIMARY KEY,
+    root_rpid       TEXT NOT NULL,
+    item_id         TEXT NOT NULL DEFAULT '',
+    uname           TEXT NOT NULL DEFAULT '',
+    content         TEXT NOT NULL DEFAULT '',
+    rich_content    TEXT NOT NULL DEFAULT '',
+    ctime           INTEGER NOT NULL DEFAULT 0,
+    seen_at         TEXT DEFAULT (datetime('now', 'localtime'))
+)
+"""
+
 CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_items_level ON monitored_items(monitor_level, source)",
     "CREATE INDEX IF NOT EXISTS idx_items_upuid ON monitored_items(up_uid)",
@@ -151,6 +169,7 @@ class Database:
         await self._conn.execute(CREATE_SUB_COMMENT_BASELINE)
         await self._conn.execute(CREATE_DIGEST_STATE)
         await self._conn.execute(CREATE_NEVER_ARCHIVE)
+        await self._conn.execute(CREATE_SUB_COMMENT_CACHE)
 
         # 建索引
         for idx_sql in CREATE_INDEXES:
@@ -836,6 +855,88 @@ class Database:
             (item_id, str(root_rpid)),
         )
         await self._conn.commit()
+
+    # ----------------------------------------------------------
+    # 子评论快照缓存（跨翻页窗口回查被回复的原评论）
+    # ----------------------------------------------------------
+
+    async def save_sub_comment_snapshots(self, parsed_subs: list,
+                                         item_id: str, root_rpid) -> None:
+        """批量写入子评论快照（INSERT OR IGNORE，不覆盖旧行）。
+
+        只新增不更新：父评论被删除后，旧快照仍能保持引用完整。
+        一次 executemany + 一次 commit，避免逐条事务拖慢弱性能服务器。
+
+        Args:
+            parsed_subs: parse_sub_comment 解析后的子评论列表
+            item_id: 所属作品ID
+            root_rpid: 所属根评论 rpid
+        """
+        if not parsed_subs:
+            return
+        sql = """
+        INSERT OR IGNORE INTO sub_comment_cache
+            (rpid, root_rpid, item_id, uname, content, rich_content, ctime)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """
+        root_key = str(root_rpid)
+        rows = [
+            (
+                str(p.get("rpid")),
+                root_key,
+                item_id,
+                p.get("uname", ""),
+                p.get("content", ""),
+                p.get("rich_content", "") or "",
+                int(p.get("ctime") or 0),
+            )
+            for p in parsed_subs
+        ]
+        await self._conn.executemany(sql, rows)
+        await self._conn.commit()
+
+    async def get_sub_comment_snapshots(self, rpids: list) -> dict:
+        """按 rpid 批量取子评论快照（父评论跨窗口回查用）。
+
+        Args:
+            rpids: rpid 列表（int/str 均可）
+
+        Returns:
+            {str(rpid): {"uname", "content", "rich_content"}}，查不到的 rpid 不出现
+
+        分块查询：SQLite 变量上限 999，按 400 一批，防大楼层一次查太多报错。
+        """
+        keys = [str(r) for r in dict.fromkeys(rpids)]  # 去重且保序
+        if not keys:
+            return {}
+        result = {}
+        for start in range(0, len(keys), 400):
+            chunk = keys[start:start + 400]
+            placeholders = ",".join("?" * len(chunk))
+            sql = (f"SELECT rpid, uname, content, rich_content FROM sub_comment_cache "
+                   f"WHERE rpid IN ({placeholders})")
+            rows = await self._conn.execute_fetchall(sql, tuple(chunk))
+            for r in rows:
+                result[str(r["rpid"])] = {
+                    "uname": r["uname"] or "",
+                    "content": r["content"] or "",
+                    "rich_content": r["rich_content"] or "",
+                }
+        return result
+
+    async def cleanup_sub_comment_cache(self) -> int:
+        """删除已不再监测（归档/已移除）作品的子评论快照，返回删除行数。
+
+        快照只用于解析「未来互动」的被回复原评论；作品归档后不再轮询，
+        其快照即无用数据。单条 DELETE 完成，不逐行处理；SQLite 会复用
+        空闲页，无需 VACUUM，弱性能服务器上开销很小。
+        """
+        cursor = await self._conn.execute(
+            "DELETE FROM sub_comment_cache WHERE item_id NOT IN "
+            "(SELECT item_id FROM monitored_items WHERE monitor_level > 0)"
+        )
+        await self._conn.commit()
+        return cursor.rowcount or 0
 
     async def mark_notified_immediate(self, ids: list[int]):
         """标记为已即时通知"""

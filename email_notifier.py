@@ -566,7 +566,7 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
     # priority 是“事件视角”，置顶快照是“快照视角”；邮件侧不合并，只提示去哪儿看快照
     priority_note_html = (
         '<div style="margin-top:8px;color:#999;font-size:12px;">'
-        '本条即当前置顶评论 · 快照见置顶归档</div>'
+        '此条快照由置顶归档</div>'
         if is_priority else ""
     )
 

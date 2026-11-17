@@ -6,7 +6,13 @@ import random
 from datetime import datetime, timedelta
 from typing import Optional
 
-from bili_client import BiliClient, SUB_COMMENT_PAGE_SIZE, parse_comment, parse_sub_comment
+from bili_client import BiliClient, SUB_COMMENT_PAGE_SIZE, parse_comment
+from sub_comment_context import (
+    load_missing_parents,
+    parse_and_index,
+    pick_parent,
+    save_snapshots,
+)
 from config import Config, OtherUpConfig
 from database import Database
 from logger_config import logger
@@ -454,38 +460,23 @@ class Scene4Monitor:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await self.db.upsert_sub_baseline(item_id, root_rpid, replies_count, now_str)
 
-        # 构建子评论查找表
-        sub_lookup = {}
-        for raw in all_subs:
-            parsed = parse_sub_comment(raw)
-            sub_lookup[parsed["rpid"]] = {
-                "uname": parsed["uname"],
-                "content": parsed["content"],
-                "rich_content": parsed.get("rich_content", ""),
-            }
+        # 解析一次并构建查找表；顺手写入本地子评论快照，供跨窗口回查父评论
+        parsed_subs, sub_lookup = parse_and_index(all_subs)
+        await save_snapshots(self.db, parsed_subs, item_id, root_rpid)
+        cached_parents = await load_missing_parents(
+            self.db, parsed_subs, root_rpid, self.target_uid, sub_lookup
+        )
 
         target_found = False
-        for raw in all_subs:
-            parsed = parse_sub_comment(raw)
+        for parsed in parsed_subs:
             # 仅匹配目标UP主的回复
             if parsed["mid"] != self.target_uid:
                 continue
 
             target_found = True
-            parent_rpid = parsed["parent_rpid"]
-            if parent_rpid == root_rpid:
-                # root_context 可能为 None（sweep 兜底扫查场景，无主列表上下文）
-                parent_content = root_context["content"] if root_context else ""
-                parent_author = root_context["uname"] if root_context else ""
-                parent_rich = root_context.get("rich_content", "") if root_context else ""
-            elif parent_rpid in sub_lookup:
-                parent_content = sub_lookup[parent_rpid]["content"]
-                parent_author = sub_lookup[parent_rpid]["uname"]
-                parent_rich = sub_lookup[parent_rpid]["rich_content"]
-            else:
-                parent_content = ""
-                parent_author = ""
-                parent_rich = ""
+            parent_content, parent_author, parent_rich = pick_parent(
+                parsed, root_rpid, root_context, sub_lookup, cached_parents
+            )
 
             await self.db.insert_interaction({
                 "up_uid": self.target_uid,
@@ -519,7 +510,7 @@ class Scene4Monitor:
         - 已归档（L0）基线在 SQL 层过滤（get_all_sub_baselines JOIN）
         - count 无变化但基线过期（>sub_sweep_max_age）时仅同步权威 count，
           零翻页（原实现此时照样 force_full 全量重翻，是 -412 风暴主因）
-        无主列表上下文时 root_context 传 None，parent 显示留空。
+        无主列表上下文时 root_context 传 None，parent 先查本地子评论快照，查不到才留空。
         """
         other_uids = {other.uid for other in self.config.scene4.other_up_list}
         rows = await self.db.get_all_sub_baselines(source="scene4", up_uids=list(other_uids))

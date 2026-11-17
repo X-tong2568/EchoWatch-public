@@ -5,7 +5,13 @@ import asyncio
 import random
 from datetime import datetime
 
-from bili_client import BiliClient, SUB_COMMENT_PAGE_SIZE, parse_comment, parse_sub_comment
+from bili_client import BiliClient, SUB_COMMENT_PAGE_SIZE, parse_comment
+from sub_comment_context import (
+    load_missing_parents,
+    parse_and_index,
+    pick_parent,
+    save_snapshots,
+)
 from config import Config, UpConfig
 from database import Database
 from email_notifier import Notifier
@@ -466,12 +472,14 @@ class Scene1Monitor:
 
         成功翻完窗口才更新检测基线（rcount 节流用）。
 
-        获取被回复评论上下文的策略：
-        1. 拉取窗口内所有子评论，构建 {rpid → {uname, content}} 查找表
+        获取被回复评论上下文的策略（v2.9 起带本地快照兜底）：
+        1. 拉取窗口内所有子评论，构建 {rpid → {uname, content}} 查找表，
+           同时把窗口内子评论批量写入 sub_comment_cache（零额外 API 请求）
         2. 对每条 UP主 子评论，parent_rpid 指向被回复者：
            - parent_rpid == root_rpid → 被回复的是根评论（root_context）
            - parent_rpid 在子评论查找表中 → 被回复的是其他子评论
-           - 否则 → 上下文未知（窗口外的老评论，留空）
+           - 否则 → 查本地快照表（之前翻页缓存过的老评论）
+           - 都查不到 → 留空
 
         Args:
             check_up_liked: 是否检测"UP觉得很赞"（up_action.like）。
@@ -553,35 +561,21 @@ class Scene1Monitor:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await self.db.upsert_sub_baseline(item_id, root_rpid, replies_count, now_str)
 
-        # 构建子评论查找表
-        sub_lookup = {}
-        for raw in all_subs:
-            parsed = parse_sub_comment(raw)
-            sub_lookup[parsed["rpid"]] = {
-                "uname": parsed["uname"],
-                "content": parsed["content"],
-                "rich_content": parsed.get("rich_content", ""),
-            }
+        # 解析一次并构建查找表；顺手把窗口内子评论写入本地快照，
+        # 供之后跨窗口回查「被回复的原评论」（零额外 API 请求）
+        parsed_subs, sub_lookup = parse_and_index(all_subs)
+        await save_snapshots(self.db, parsed_subs, item_id, root_rpid)
+        # 父评论不在本次窗口的，批量查本地快照（一轮通常只有几条 UP 回复）
+        cached_parents = await load_missing_parents(
+            self.db, parsed_subs, root_rpid, up.uid, sub_lookup
+        )
 
-        for raw in all_subs:
-            parsed = parse_sub_comment(raw)
-
+        for parsed in parsed_subs:
             # 检查 1：UP主 自己的子回复
             if parsed["mid"] == up.uid:
-                parent_rpid = parsed["parent_rpid"]
-                if parent_rpid == root_rpid:
-                    # root_context 可能为 None（兜底扫查场景，无主列表上下文）
-                    parent_content = root_context["content"] if root_context else ""
-                    parent_author = root_context["uname"] if root_context else ""
-                    parent_rich = root_context.get("rich_content", "") if root_context else ""
-                elif parent_rpid in sub_lookup:
-                    parent_content = sub_lookup[parent_rpid]["content"]
-                    parent_author = sub_lookup[parent_rpid]["uname"]
-                    parent_rich = sub_lookup[parent_rpid]["rich_content"]
-                else:
-                    parent_content = ""
-                    parent_author = ""
-                    parent_rich = ""
+                parent_content, parent_author, parent_rich = pick_parent(
+                    parsed, root_rpid, root_context, sub_lookup, cached_parents
+                )
 
                 await self.db.insert_interaction({
                     "up_uid": up.uid,
@@ -636,7 +630,7 @@ class Scene1Monitor:
         约定：scene2 没有独立的 sweep 循环（其基线由本 sweep 代查——
         scene2 话题帖 item 的 up_uid 与 up_list 同值，JOIN 用 up_uids
         过滤天然混入），互动归属按 item 实际 source 传入（scene 参数）。
-        无主列表上下文时 root_context 传 None，parent 显示留空。
+        无主列表上下文时 root_context 传 None，parent 先查本地子评论快照，查不到才留空。
         """
         up_uids = [u.uid for u in self.config.up_list]
         rows = await self.db.get_all_sub_baselines(up_uids=up_uids)

@@ -1,4 +1,4 @@
-# EchoWatch（留声）v2.8
+# EchoWatch（留声）v2.9
 
 B站 UP主 互动监测系统 —— 实时发现 UP主 在评论区中的互动行为，通过邮件推送通知。
 
@@ -172,6 +172,7 @@ echowatch/
 ├── monitor_scene4.py           # 场景四：其他UP动态评论区监测（目标UP主回复）
 ├── scheduler.py                # 任务调度器
 ├── email_notifier.py           # 邮件通知（富媒体渲染 + 随机主题）
+├── sub_comment_context.py      # 子评论上下文工具（快照缓存/父评论回查）
 ├── echowatch_archive.py        # GitHub 互动归档（v2.7：GitData/队列/置顶路由/月归档）
 ├── screenshotter.py            # Playwright 截图（场景原帖，元素级卡片）
 ├── pinned_dynamic_monitor.py   # 置顶动态自动发现与变更检测
@@ -201,6 +202,7 @@ MIT
 
 | 版本 | 日期 | 更新内容 |
 |------|------|---------|
+| v2.9 | 2026-11-17 | 子评论原评论快照缓存 + 自动清理 |
 | v2.8 | 2026-11-11 | 归档署名改为可配置 |
 | v2.7 | 2026-11-10 | 互动归档改为按月，与其他归档分组一致 |
 | v2.6 | 2026-11-10 | 根 README 粉丝互动按月索引 |

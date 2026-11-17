@@ -6,7 +6,13 @@ import random
 from datetime import datetime, timedelta
 from typing import Optional
 
-from bili_client import BiliClient, SUB_COMMENT_PAGE_SIZE, parse_comment, parse_sub_comment
+from bili_client import BiliClient, SUB_COMMENT_PAGE_SIZE, parse_comment
+from sub_comment_context import (
+    load_missing_parents,
+    parse_and_index,
+    pick_parent,
+    save_snapshots,
+)
 from config import Config, UpConfig
 from database import Database
 from logger_config import logger
@@ -373,35 +379,22 @@ class Scene2Monitor:
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await self.db.upsert_sub_baseline(item_id, root_rpid, replies_count, now_str)
 
-        sub_lookup = {}
-        for raw in all_subs:
-            parsed = parse_sub_comment(raw)
-            sub_lookup[parsed["rpid"]] = {
-                "uname": parsed["uname"],
-                "content": parsed["content"],
-                "rich_content": parsed.get("rich_content", ""),
-            }
+        # 解析一次并构建查找表；顺手写入本地子评论快照，供跨窗口回查父评论
+        parsed_subs, sub_lookup = parse_and_index(all_subs)
+        await save_snapshots(self.db, parsed_subs, item_id, root_rpid)
+        cached_parents = await load_missing_parents(
+            self.db, parsed_subs, root_rpid, up.uid, sub_lookup
+        )
 
         up_found = False
-        for raw in all_subs:
-            parsed = parse_sub_comment(raw)
+        for parsed in parsed_subs:
             if parsed["mid"] != up.uid:
                 continue
 
             up_found = True
-            parent_rpid = parsed["parent_rpid"]
-            if parent_rpid == root_rpid:
-                parent_content = root_context["content"]
-                parent_author = root_context["uname"]
-                parent_rich = root_context.get("rich_content", "")
-            elif parent_rpid in sub_lookup:
-                parent_content = sub_lookup[parent_rpid]["content"]
-                parent_author = sub_lookup[parent_rpid]["uname"]
-                parent_rich = sub_lookup[parent_rpid]["rich_content"]
-            else:
-                parent_content = ""
-                parent_author = ""
-                parent_rich = ""
+            parent_content, parent_author, parent_rich = pick_parent(
+                parsed, root_rpid, root_context, sub_lookup, cached_parents
+            )
 
             await self.db.insert_interaction({
                 "up_uid": up.uid,

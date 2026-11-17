@@ -103,12 +103,13 @@ class Scheduler:
         tasks.append(asyncio.create_task(self._daily_digest_loop()))
         tasks.append(asyncio.create_task(self._immediate_notify_loop()))
         tasks.append(asyncio.create_task(self._archive_cleanup_loop()))
+        tasks.append(asyncio.create_task(self._sub_cache_cleanup_loop()))
         if self.arch and self.arch.enabled:
             tasks.append(asyncio.create_task(self._archive_flush_loop()))
             logger.info("GitHub 互动归档 flush 循环已启动")
         # 注：v2.0 起截图时机改为"推送时按需补截"（_retry_screenshot_before_send），
         # 入库即截/待补截标记机制（screenshot_pending）已废弃，补截循环随之删除
-        logger.info("通用调度任务已启动 (归档+日报+场景一即时通知+留档清理)")
+        logger.info("通用调度任务已启动 (归档+日报+场景一即时通知+留档清理+子评论快照清理)")
 
         self._tasks = tasks
         try:
@@ -635,6 +636,25 @@ class Scheduler:
                 await self.arch.flush("timer")
             except Exception as e:
                 logger.error(f"互动归档 flush 异常: {e}")
+            await asyncio.sleep(interval)
+
+    async def _sub_cache_cleanup_loop(self):
+        """
+        子评论快照清理循环：每日删除已归档/已移除作品的快照。
+
+        快照只服务于「未来互动」的父评论解析；作品归档即停止轮询，缓存随即可回收。
+        只按作品生命周期清理，不按时间删——置顶楼里几天前的父评论仍可能被回复，
+        按时间删会重新出现「邮件缺原评论」的问题。
+        """
+        interval = 24 * 3600
+        logger.info("子评论快照清理循环: 每日执行（仅清理已归档/已移除作品）")
+        while self.running:
+            try:
+                removed = await self.db.cleanup_sub_comment_cache()
+                if removed:
+                    logger.info(f"子评论快照清理: 删除 {removed} 条已归档作品的缓存")
+            except Exception as e:
+                logger.error(f"子评论快照清理异常: {e}")
             await asyncio.sleep(interval)
 
     async def _archive_cleanup_loop(self):
