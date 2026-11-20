@@ -546,6 +546,8 @@ class EchoArchive:
         self._lock = asyncio.Lock()
         self._cursor_cache: Tuple[float, dict] = (0.0, {})
         self._warned_images: Set[str] = set()
+        # 可选注入：归档前给缺图互动补截原帖（不影响无截图器的离线补档）
+        self.screenshotter = None
 
         if not self.enabled:
             self.writer = None
@@ -664,6 +666,11 @@ class EchoArchive:
                     base = await asyncio.to_thread(self.writer.get_base)
                     cursor = await self._get_cursor(base)
                     await self._freeze_pinned(cursor)
+                    if reason != "shutdown":
+                        # 停机时浏览器即将关闭、无重试机会，跳过补截优先完成落盘
+                        await self._fill_missing_screenshots(
+                            pending, cursor, priority_ids
+                        )
                     files, new_ids = await asyncio.to_thread(
                         self._build_files, base, pending, cursor, priority_ids
                     )
@@ -876,13 +883,58 @@ class EchoArchive:
                 logger.info(f"置顶评论本体移出 EchoWatch 归档: rpid={rpid}")
         return overrides, removed_ids
 
+    async def _fill_missing_screenshots(self, pending: List[dict], cursor: dict,
+                                        priority_ids: Set[str]) -> None:
+        """
+        归档前补截：会入档的互动若原帖无截图，现场截一次。
+
+        补的是通知阶段没截到的缺口（发送前补截失败/超时），让归档尽量带原帖画面。
+        跳过规则与 _build_files 一致（priority 主评论、当前/上一任置顶本体不归档）；
+        单条失败只记 warning，照旧无图归档，不重试不阻塞。同一原帖多条互动只截一次。
+        """
+        if not self.screenshotter or not PIL_AVAILABLE:
+            return
+        save_dir = self._screenshot_dir()
+        pinned_rpid = str(cursor.get("pinned_rpid") or "")
+        prev_rpid = str(cursor.get("prev_rpid") or "")
+        seen: Set[str] = set()
+        for item in pending:
+            rpid = str(item.get("comment_id") or "")
+            item_id = str(item.get("item_id") or "")
+            if not rpid or not item_id or rpid.endswith("_like"):
+                continue
+            if rpid in self._archived_ids:
+                continue
+            if item_id in priority_ids and not item.get("is_sub_reply"):
+                continue
+            if pinned_rpid and rpid in (pinned_rpid, prev_rpid):
+                continue
+            if item_id in seen:
+                continue
+            seen.add(item_id)
+            if (save_dir / f"dynamic_{item_id}.jpeg").exists():
+                continue
+            try:
+                path = await self.screenshotter.take_dynamic_screenshot(item_id)
+            except Exception as e:
+                path = None
+                logger.warning(f"归档前补截异常 ({item_id}): {e}")
+            if path:
+                logger.info(f"归档前补截成功: {item_id}")
+
+    def _screenshot_dir(self) -> Path:
+        """原帖截图目录：优先截图器实际写入目录，保证补截的结果归档时读得到"""
+        if self.screenshotter is not None and getattr(self.screenshotter, "save_dir", None):
+            return Path(self.screenshotter.save_dir)
+        return Path(self.cfg.screenshot_dir)
+
     def _build_image(self, item: dict) -> Optional[Tuple[str, bytes]]:
         """把 sent_emails/dynamic_{item_id}.jpeg 转成 {rpid}.webp"""
         rpid = str(item.get("comment_id") or "")
         item_id = str(item.get("item_id") or "")
         if not rpid or not item_id or rpid.endswith("_like"):
             return None
-        src = Path(self.cfg.screenshot_dir) / f"dynamic_{item_id}.jpeg"
+        src = self._screenshot_dir() / f"dynamic_{item_id}.jpeg"
         if not src.exists():
             if item_id not in self._warned_images:
                 self._warned_images.add(item_id)
@@ -1068,7 +1120,7 @@ class EchoArchive:
         item_id = str(item.get("item_id") or "")
         if not PIL_AVAILABLE or not rpid or not item_id or rpid.endswith("_like"):
             return None
-        src = Path(self.cfg.screenshot_dir) / f"dynamic_{item_id}.jpeg"
+        src = self._screenshot_dir() / f"dynamic_{item_id}.jpeg"
         if not src.exists():
             return None
         day = _entry_day(item)

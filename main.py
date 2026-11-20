@@ -127,6 +127,10 @@ async def main():
             logger.warning(f"截图器启动失败，场景二将使用文本模式: {e}")
             screenshotter = None
 
+    # 归档前补截：通知阶段没截到原帖图的互动，flush 前用同一截图器再补一次
+    if archive and screenshotter:
+        archive.screenshotter = screenshotter
+
     # ----------------------------------------------------------
     # 7. 初始化各模块
     # ----------------------------------------------------------

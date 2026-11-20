@@ -2,6 +2,7 @@
 """EchoWatch GitHub 归档离线测试（全部走 DRY_RUN，不碰真实仓库）"""
 
 import asyncio
+import base64
 import hashlib
 import json
 import re
@@ -50,6 +51,31 @@ def make_item(rpid, content="hello", item_id="D1", scene="scene1",
     }
     data.update(kwargs)
     return data
+
+
+# 1x1 JPEG，用于验证"补截 -> 转 WebP -> 归档贴图"链路
+_TINY_JPEG = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a"
+    "HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAA"
+    "AAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q=="
+)
+
+
+class FakeScreenshotter:
+    """模拟截图器：成功时写一张 1x1 JPEG；fail=True 时返回 None 不写文件"""
+
+    def __init__(self, save_dir, fail=False):
+        self.save_dir = Path(save_dir)
+        self.fail = fail
+        self.calls = []
+
+    async def take_dynamic_screenshot(self, dynamic_id):
+        self.calls.append(dynamic_id)
+        if self.fail:
+            return None
+        path = self.save_dir / f"dynamic_{dynamic_id}.jpeg"
+        path.write_bytes(_TINY_JPEG)
+        return str(path)
 
 
 class ArchiveTest(unittest.IsolatedAsyncioTestCase):
@@ -301,6 +327,45 @@ class ArchiveTest(unittest.IsolatedAsyncioTestCase):
             encoding="utf-8"
         )
         self.assertNotIn("![原帖截图]", md)
+
+    async def test_missing_screenshot_filled_before_archive(self):
+        """归档前缺图互动补截一次，MD 带原帖截图"""
+        arch = self.make_archive()
+        fake = FakeScreenshotter(self.screens)
+        arch.screenshotter = fake
+        await arch.enqueue(make_item("100", content="补一张图"))
+        self.assertTrue(await arch.flush("fill"))
+        self.assertEqual(fake.calls, ["D1"])
+        md = (Path(arch.cfg.preview_dir) / "comments/2026-11.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("![原帖截图](assets/2026/11/100.webp)", md)
+
+    async def test_screenshot_fill_failure_still_archives(self):
+        """补截失败不阻塞归档，条目照旧无图"""
+        arch = self.make_archive()
+        arch.screenshotter = FakeScreenshotter(self.screens, fail=True)
+        await arch.enqueue(make_item("100", content="没图也归档"))
+        self.assertTrue(await arch.flush("fill_fail"))
+        md = (Path(arch.cfg.preview_dir) / "comments/2026-11.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("没图也归档", md)
+        self.assertNotIn("![原帖截图]", md)
+
+    async def test_screenshot_fill_skips_priority_and_existing(self):
+        """priority 主评论不补截；已有截图文件不重复截"""
+        arch = self.make_archive(db=FakeDB(priority_ids={"D1"}))
+        fake = FakeScreenshotter(self.screens)
+        arch.screenshotter = fake
+        await arch.enqueue(make_item("100", item_id="D1"))  # priority 主评论
+        await arch.flush("skip_priority")
+        self.assertEqual(fake.calls, [])
+
+        (self.screens / "dynamic_D2.jpeg").write_bytes(_TINY_JPEG)
+        await arch.enqueue(make_item("101", item_id="D2"))  # 图已存在
+        await arch.flush("skip_existing")
+        self.assertEqual(fake.calls, [])
 
     async def test_concurrent_flush_no_duplicates(self):
         arch = self.make_archive()
