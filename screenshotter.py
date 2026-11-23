@@ -57,6 +57,11 @@ DEVICE_SCALE_FACTOR = 2        # 2x Retina 显示清晰度：邮件容器虽只�
 BROWSER_RESTART_INTERVAL = 50  # 每 50 次截图重启浏览器
 # 动态卡片 CSS 选择器（照搬 BTCE3.0）
 CARD_SELECTOR = '.bili-dyn-item, [class*="dyn-card"]'
+# 界面语言固定中文：Playwright 默认 locale 是 en-US，请求头带 Accept-Language: en-US，
+# 走到海外代理节点时 B站会按浏览器语言渲染英文界面（部分节点必现），截图也跟着变英文。
+# 显式指定 zh-CN 同时覆盖 navigator.language 和 Accept-Language，截图稳定出中文页面
+CONTEXT_LOCALE = "zh-CN"
+ACCEPT_LANGUAGE = "zh-CN,zh;q=0.9"
 
 
 class Screenshotter:
@@ -178,7 +183,12 @@ class Screenshotter:
             Exception: 页面加载/截图过程中的任意失败（goto超时、元素异常等）
         """
         # 独立高 DPI context，避免与其他截图互相干扰；配了代理则显式走代理（绕机房 IP 412 风控）
-        context_opts = {"device_scale_factor": DEVICE_SCALE_FACTOR}
+        # locale + Accept-Language 双保险，固定中文界面（海外出口 IP 下默认 en-US 会截出英文页）
+        context_opts = {
+            "device_scale_factor": DEVICE_SCALE_FACTOR,
+            "locale": CONTEXT_LOCALE,
+            "extra_http_headers": {"Accept-Language": ACCEPT_LANGUAGE},
+        }
         if SCREENSHOT_PROXY:
             context_opts["proxy"] = {"server": SCREENSHOT_PROXY}
         shot_ctx = await self._browser.new_context(**context_opts)
@@ -192,7 +202,7 @@ class Screenshotter:
             # 先种游客 cookie，再访问目标页面（顺序不能反）
             await self._seed_cookies(page)
 
-            # 降级路径（空间动态API风控）的 item_id 带 av 前缀，如 av123456789012：
+            # 降级路径（空间动态API风控）的 item_id 带 av 前缀，如 av117032272005640：
             # 没有动态页，只能截视频页（www.bilibili.com/video/av{aid}），走全页降级截图
             is_av_fallback = dynamic_id.startswith("av")
             if is_av_fallback:
