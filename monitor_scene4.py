@@ -334,6 +334,7 @@ class Scene4Monitor:
                 "parent_author": None,
                 "content": content,
                 "rich_content": parsed.get("rich_content", ""),
+                "ctime": parsed.get("ctime", 0),  # 评论发布时间（邮件展示用）
                 "comment_author": parsed["uname"],  # 真实发送者昵称（统一徽章用）
                 "up_liked": False,
                 "scene": "scene4",
@@ -488,6 +489,7 @@ class Scene4Monitor:
                 "parent_rich_content": parent_rich,
                 "content": parsed["content"],
                 "rich_content": parsed.get("rich_content", ""),
+                "ctime": parsed.get("ctime", 0),  # 评论发布时间（邮件展示用）
                 "comment_author": parsed["uname"],  # 真实发送者昵称（统一徽章用）
                 "up_liked": False,
                 "scene": "scene4",

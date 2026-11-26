@@ -475,6 +475,17 @@ def _embed_screenshot(screenshot_path: Optional[str]) -> Optional[str]:
         return None
 
 
+def _format_ctime(ctime) -> str:
+    """把 B站 ctime（Unix 秒）转成本地时间字符串；无效或缺失返回空串"""
+    try:
+        ts = int(ctime or 0)
+    except (TypeError, ValueError):
+        return ""
+    if ts <= 0:
+        return ""
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def build_single_email(interaction: dict, up_name: str, item_type: str = "", theme: dict = None, post_content: str = "", post_rich_content: str = "", oid_map: dict = None, include_post_context: bool = True, is_priority: bool = False, priority_badge_text: str = "优先通知") -> str:
     """构建单条互动邮件 HTML，可选传入预设主题（预览用）。场景二原帖自动从 sent_emails/ 读截图。
 
@@ -493,6 +504,11 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
     parent_content = interaction.get("parent_content", "")
     parent_author = interaction.get("parent_author", "")
     discovered_at = interaction.get("discovered_at", "")
+    comment_time = _format_ctime(interaction.get("ctime"))
+    # 老数据无 ctime 时不显示该字段，避免误导
+    comment_time_html = (
+        f'<span>评论时间：{html.escape(comment_time)}</span>' if comment_time else ""
+    )
 
     scene_name = "自身作品" if scene == "scene1" else ("话题互动" if scene == "scene2" else ("其他UP动态" if scene == "scene4" else "切片视频"))
     reply_type = "子评论" if is_sub else "主评论"
@@ -594,7 +610,8 @@ def build_single_email(interaction: dict, up_name: str, item_type: str = "", the
         <div class="stats">
             <span>UP主：<strong>{safe_up}</strong></span>
             <span>场景：{scene_name}</span>
-            <span>时间：{html.escape(discovered_at)}</span>
+            {comment_time_html}
+            <span>发现时间：{html.escape(discovered_at)}</span>
         </div>
         <div class="interaction">
             <span class="badge">{reply_type}</span>{priority_badge_html}{like_html}
@@ -651,6 +668,11 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         parent_content = interaction.get("parent_content", "")
         parent_author = interaction.get("parent_author", "")
         discovered_at = interaction.get("discovered_at", "")
+        comment_time = _format_ctime(interaction.get("ctime"))
+        time_label = (
+            f"评论时间：{comment_time} · 发现时间：{discovered_at}"
+            if comment_time else f"发现时间：{discovered_at}"
+        )
 
         scene_name = "自身作品" if scene == "scene1" else ("话题互动" if scene == "scene2" else ("其他UP动态" if scene == "scene4" else "切片视频"))
         reply_type = "子评论" if is_sub else "主评论"
@@ -724,7 +746,7 @@ def build_digest_email(interactions: list, up_name: str = "", post_contents: dic
         items_html += f"""
         <div class="interaction">
             <div class="label" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px">
-                <span>#{i+1} {html.escape(discovered_at)} {scene_badge} {like_badge} {reply_badge} {priority_badge_html}</span>
+                <span>#{i+1} {html.escape(time_label)} {scene_badge} {like_badge} {reply_badge} {priority_badge_html}</span>
                 <a class="btn" href="{html.escape(comment_url)}" target="_blank" style="padding:3px 12px; font-size:11px; margin-right:0">评论直达</a>
             </div>
             {post_context_html}
@@ -1292,6 +1314,7 @@ async def _test():
         "rich_content": test_rich,
         "up_liked": False,
         "scene": "scene1",
+        "ctime": int(time.time()) - 60,
         "discovered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -1320,6 +1343,7 @@ async def _test():
         }, ensure_ascii=False),
         "up_liked": False,
         "scene": "scene1",
+        "ctime": int(time.time()) - 60,
         "discovered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     html2 = build_single_email(test_sub, "某UP主")
@@ -1347,6 +1371,7 @@ async def _test():
         "rich_content": None,
         "up_liked": False,
         "scene": "scene1",
+        "ctime": int(time.time()) - 60,
         "discovered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     html4 = build_single_email(test_no_rich, "某UP主")

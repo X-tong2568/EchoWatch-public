@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS interactions (
     parent_author       TEXT,
     content             TEXT,
     rich_content        TEXT,
+    ctime               INTEGER NOT NULL DEFAULT 0,
     comment_author      TEXT,
     up_liked            INTEGER DEFAULT 0,
     scene               TEXT NOT NULL,
@@ -182,6 +183,7 @@ class Database:
         await self._migrate_add_parent_rich_content()
         await self._migrate_add_screenshot_pending()
         await self._migrate_add_comment_author()
+        await self._migrate_add_ctime()
 
         await self._conn.commit()
         logger.info(f"数据库初始化完成: {self.db_path}")
@@ -269,6 +271,21 @@ class Database:
             )
             await self._conn.commit()
             logger.info("数据库迁移: 已添加 monitored_items.screenshot_pending 列")
+
+    async def _migrate_add_ctime(self):
+        """迁移：给已有数据库的 interactions 表加 ctime 列（如不存在）
+
+        用途：评论发布时间（B站 API ctime，Unix 秒），邮件里显示「评论时间」。
+        老数据该列为 0，邮件渲染时降级为不显示。
+        """
+        columns = await self._conn.execute_fetchall("PRAGMA table_info(interactions)")
+        col_names = [row[1] for row in columns]
+        if "ctime" not in col_names:
+            await self._conn.execute(
+                "ALTER TABLE interactions ADD COLUMN ctime INTEGER NOT NULL DEFAULT 0"
+            )
+            await self._conn.commit()
+            logger.info("数据库迁移: 已添加 interactions.ctime 列")
 
     async def _migrate_add_comment_author(self):
         """迁移：给已有数据库的 interactions 表加 comment_author 列（如不存在）
@@ -724,9 +741,9 @@ class Database:
         INSERT OR IGNORE INTO interactions
             (up_uid, item_id, comment_id, is_sub_reply,
              parent_content, parent_author, parent_rich_content,
-             content, rich_content, comment_author, up_liked,
+             content, rich_content, ctime, comment_author, up_liked,
              scene, discovered_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         cursor = await self._conn.execute(sql, (
             data.get("up_uid"),
@@ -738,6 +755,7 @@ class Database:
             data.get("parent_rich_content"),
             data.get("content"),
             data.get("rich_content"),
+            int(data.get("ctime") or 0),
             data.get("comment_author"),
             1 if data.get("up_liked") else 0,
             data.get("scene"),
@@ -1091,6 +1109,7 @@ async def _test():
         data = {"up_uid": "000000000", "item_id": "dyn_001", "comment_id": "rpid_123",
                 "is_sub_reply": False, "content": "测试评论",
                 "rich_content": '{"emote":{},"pictures":[],"jump_url":{}}',
+                "ctime": 1700000000,
                 "up_liked": False, "scene": "scene1"}
         assert await db.insert_interaction(data)
         assert not await db.insert_interaction(data)  # 重复
